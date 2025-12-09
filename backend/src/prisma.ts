@@ -1,6 +1,9 @@
-// backend/src/prisma.ts
 import "dotenv/config";
 import { PrismaClient } from "@prisma/client";
+import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
 
-// Exportamos una única instancia de PrismaClient apuntando al datasource configurado (Postgres en producción)
-export const prisma = new PrismaClient();
+const adapter = new PrismaBetterSqlite3({
+  url: process.env.DATABASE_URL || "file:./dev.db",
+});
+
+export const prisma = new PrismaClient({ adapter });
