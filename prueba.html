@@ -1,0 +1,733 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Blog Sostenibilidad</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Georgia', serif;
+            background-color: #fafafa;
+            color: #333;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        /* Header */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 0;
+            border-bottom: 1px solid #e0e0e0;
+            margin-bottom: 30px;
+        }
+
+        .nav {
+            display: flex;
+            gap: 30px;
+        }
+
+        .nav-item {
+            text-decoration: none;
+            color: #666;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            cursor: pointer;
+            transition: color 0.3s;
+        }
+
+        .nav-item:hover,
+        .nav-item.active {
+            color: #000;
+            text-decoration: underline;
+        }
+
+        .search-box {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            border: 1px solid #e0e0e0;
+            padding: 8px 15px;
+            border-radius: 20px;
+        }
+
+        .search-box input {
+            border: none;
+            outline: none;
+            background: transparent;
+            font-size: 14px;
+        }
+
+        /* Featured Article */
+        .featured {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            margin-bottom: 40px;
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .featured-image {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .featured-content {
+            padding: 40px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        .category {
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #666;
+            margin-bottom: 10px;
+        }
+
+        .date {
+            font-size: 12px;
+            color: #999;
+            margin-left: 15px;
+        }
+
+        .featured-title {
+            font-size: 32px;
+            line-height: 1.3;
+            margin-bottom: 20px;
+            font-weight: normal;
+        }
+
+        .featured-text {
+            font-size: 14px;
+            line-height: 1.6;
+            color: #666;
+            margin-bottom: 20px;
+        }
+
+        .read-more {
+            color: #333;
+            text-decoration: none;
+            font-size: 14px;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .read-more:hover {
+            text-decoration: underline;
+        }
+
+        /* Grid Articles */
+        .articles-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 25px;
+            margin-bottom: 40px;
+        }
+
+        .article-card {
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            transition: transform 0.3s;
+        }
+
+        .article-card:hover {
+            transform: translateY(-5px);
+        }
+
+        .article-image {
+            width: 100%;
+            height: 250px;
+            object-fit: cover;
+        }
+
+        .article-content {
+            padding: 25px;
+        }
+
+        .article-title {
+            font-size: 22px;
+            margin-bottom: 15px;
+            font-weight: normal;
+        }
+
+        .article-text {
+            font-size: 13px;
+            line-height: 1.6;
+            color: #666;
+            margin-bottom: 15px;
+        }
+
+        /* List Articles */
+        .articles-list {
+            display: flex;
+            flex-direction: column;
+            gap: 25px;
+            margin-bottom: 40px;
+        }
+
+        .article-list-item {
+            display: grid;
+            grid-template-columns: 300px 1fr;
+            gap: 30px;
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .list-image {
+            width: 100%;
+            height: 200px;
+            object-fit: cover;
+        }
+
+        .list-content {
+            padding: 30px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        .list-title {
+            font-size: 24px;
+            margin-bottom: 15px;
+            font-weight: normal;
+        }
+
+        /* Pagination */
+        .pagination {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 15px;
+            margin: 40px 0;
+        }
+
+        .page-btn {
+            width: 40px;
+            height: 40px;
+            border: 1px solid #e0e0e0;
+            border-radius: 50%;
+            background: white;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            color: #666;
+            transition: all 0.3s;
+        }
+
+        .page-btn:hover {
+            background: #f5f5f5;
+        }
+
+        .page-info {
+            font-size: 14px;
+            color: #666;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        /* Accessibility button */
+        .accessibility-btn {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            background: #007bff;
+            color: white;
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            z-index: 1000;
+        }
+
+        @media (max-width: 768px) {
+            .featured,
+            .article-list-item {
+                grid-template-columns: 1fr;
+            }
+
+            .articles-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .nav {
+                flex-wrap: wrap;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <nav class="nav">
+                <a class="nav-item active" data-category="todos">TODOS</a>
+                <a class="nav-item" data-category="sostenibilidad">SOSTENIBILIDAD</a>
+                <a class="nav-item" data-category="inspiracion">INSPIRACIÓN</a>
+                <a class="nav-item" data-category="artesania">ARTESANÍA</a>
+                <a class="nav-item" data-category="comunidad">COMUNIDAD</a>
+            </nav>
+            <div class="search-box">
+                <input type="text" placeholder="Buscar artículo">
+                <span>🔍</span>
+            </div>
+        </div>
+
+        <!-- Content Container -->
+        <div id="content-container">
+            <!-- Featured Article -->
+            <div class="featured">
+                <img src="https://images.unsplash.com/photo-1600210492486-724fe5c67fb0?w=800" alt="Featured" class="featured-image">
+                <div class="featured-content">
+                    <div>
+                        <span class="category">Sostenibilidad</span>
+                        <span class="date">Mayo 03, 2025</span>
+                    </div>
+                    <h1 class="featured-title">Lorem ipsum dolor sit amet consectetur. Id molestie sit sit</h1>
+                    <p class="featured-text">Lorem ipsum dolor sit amet consectetur. Id molestie sit sit quis maecenas justo maecenas venenatis diam. Gravida aliquet montes purus elementum aenean pellentesque ac a congue.Lorem ipsum dolor</p>
+                    <p class="featured-text">sit amet consectetur. Id molestie sit sit quis maecenas justo maecenas venenatis diam.</p>
+                    <a href="#" class="read-more">Leer más →</a>
+                </div>
+            </div>
+
+            <!-- Grid Articles -->
+            <div class="articles-grid">
+                <div class="article-card">
+                    <img src="https://images.unsplash.com/photo-1600880292203-757bb62b4baf?w=500" alt="Article" class="article-image">
+                    <div class="article-content">
+                        <div>
+                            <span class="category">Sostenibilidad</span>
+                            <span class="date">Mayo 03, 2025</span>
+                        </div>
+                        <h2 class="article-title">Hogar para un Nómada</h2>
+                        <p class="article-text">Lorem ipsum dolor sit amet consectetur. Id molestie sit sit quis maecenas justo maecenas venenatis diam.</p>
+                        <a href="#" class="read-more">Leer más →</a>
+                    </div>
+                </div>
+
+                <div class="article-card">
+                    <img src="https://images.unsplash.com/photo-1600607687939-ce8a6c25118c?w=500" alt="Article" class="article-image">
+                    <div class="article-content">
+                        <div>
+                            <span class="category">Sostenibilidad</span>
+                            <span class="date">Mayo 03, 2025</span>
+                        </div>
+                        <h2 class="article-title">Hogar para un Nómada</h2>
+                        <p class="article-text">Lorem ipsum dolor sit amet consectetur. Id molestie sit sit quis maecenas justo maecenas venenatis diam.</p>
+                        <a href="#" class="read-more">Leer más →</a>
+                    </div>
+                </div>
+
+                <div class="article-card">
+                    <img src="https://images.unsplash.com/photo-1600566753190-17f0baa2a6c3?w=500" alt="Article" class="article-image">
+                    <div class="article-content">
+                        <div>
+                            <span class="category">Sostenibilidad</span>
+                            <span class="date">Mayo 03, 2025</span>
+                        </div>
+                        <h2 class="article-title">Hogar para un Nómada</h2>
+                        <p class="article-text">Lorem ipsum dolor sit amet consectetur. Id molestie sit sit quis maecenas justo maecenas venenatis diam.</p>
+                        <a href="#" class="read-more">Leer más →</a>
+                    </div>
+                </div>
+
+                <div class="article-card">
+                    <img src="https://images.unsplash.com/photo-1600585154340-be6161a56a0c?w=500" alt="Article" class="article-image">
+                    <div class="article-content">
+                        <div>
+                            <span class="category">Sostenibilidad</span>
+                            <span class="date">Mayo 03, 2025</span>
+                        </div>
+                        <h2 class="article-title">Hogar para un Nómada</h2>
+                        <p class="article-text">Lorem ipsum dolor sit amet consectetur. Id molestie sit sit quis maecenas justo maecenas venenatis diam.</p>
+                        <a href="#" class="read-more">Leer más →</a>
+                    </div>
+                </div>
+
+                <div class="article-card">
+                    <img src="https://images.unsplash.com/photo-1600573472591-ee6b68d14c68?w=500" alt="Article" class="article-image">
+                    <div class="article-content">
+                        <div>
+                            <span class="category">Sostenibilidad</span>
+                            <span class="date">Mayo 03, 2025</span>
+                        </div>
+                        <h2 class="article-title">Hogar para un Nómada</h2>
+                        <p class="article-text">Lorem ipsum dolor sit amet consectetur. Id molestie sit sit quis maecenas justo maecenas venenatis diam.</p>
+                        <a href="#" class="read-more">Leer más →</a>
+                    </div>
+                </div>
+
+                <div class="article-card">
+                    <img src="https://images.unsplash.com/photo-1600607687644-c7171b42498f?w=500" alt="Article" class="article-image">
+                    <div class="article-content">
+                        <div>
+                            <span class="category">Sostenibilidad</span>
+                            <span class="date">Mayo 03, 2025</span>
+                        </div>
+                        <h2 class="article-title">Hogar para un Nómada</h2>
+                        <p class="article-text">Lorem ipsum dolor sit amet consectetur. Id molestie sit sit quis maecenas justo maecenas venenatis diam.</p>
+                        <a href="#" class="read-more">Leer más →</a>
+                    </div>
+                </div>
+            </div>
+
+            <!-- List Articles (Paginated) -->
+            <div id="list-articles-container"></div>
+
+            <!-- Pagination -->
+            <div class="pagination">
+                <button class="page-btn" id="prev-btn">←</button>
+                <span class="page-info"><span id="current-page">2</span> of <span id="total-pages">4</span></span>
+                <button class="page-btn" id="next-btn">→</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Accessibility Button -->
+    <button class="accessibility-btn">A</button>
+
+    <script>
+        // Data for different categories
+        const categoryData = {
+            todos: {
+                featured: {
+                    image: 'https://images.unsplash.com/photo-1600210492486-724fe5c67fb0?w=800',
+                    category: 'Sostenibilidad',
+                    date: 'Mayo 03, 2025',
+                    title: 'Lorem ipsum dolor sit amet consectetur. Id molestie sit sit',
+                    text: 'Lorem ipsum dolor sit amet consectetur. Id molestie sit sit quis maecenas justo maecenas venenatis diam. Gravida aliquet montes purus elementum aenean pellentesque ac a congue.Lorem ipsum dolor'
+                },
+                grid: [
+                    { image: 'https://images.unsplash.com/photo-1600880292203-757bb62b4baf?w=500', category: 'Sostenibilidad', date: 'Mayo 03, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600607687939-ce8a6c25118c?w=500', category: 'Sostenibilidad', date: 'Mayo 03, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600566753190-17f0baa2a6c3?w=500', category: 'Sostenibilidad', date: 'Mayo 03, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?w=500', category: 'Sostenibilidad', date: 'Mayo 03, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600573472591-ee6b68d14c68?w=500', category: 'Sostenibilidad', date: 'Mayo 03, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600607687644-c7171b42498f?w=500', category: 'Sostenibilidad', date: 'Mayo 03, 2025' }
+                ]
+            },
+            sostenibilidad: {
+                featured: {
+                    image: 'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?w=800',
+                    category: 'Sostenibilidad',
+                    date: 'Mayo 05, 2025',
+                    title: 'Vivir de forma sostenible en el hogar moderno',
+                    text: 'Descubre cómo transformar tu espacio en un refugio ecológico. Desde materiales reciclados hasta energías renovables, te mostramos el camino hacia un hogar más verde y consciente con el planeta.'
+                },
+                grid: [
+                    { image: 'https://images.unsplash.com/photo-1600607687920-4e2a09cf159d?w=500', category: 'Sostenibilidad', date: 'Mayo 05, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600607688969-a5bfcd646154?w=500', category: 'Sostenibilidad', date: 'Mayo 05, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600566753051-f0b9e739d5f4?w=500', category: 'Sostenibilidad', date: 'Mayo 05, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600573472550-8090b5e0745e?w=500', category: 'Sostenibilidad', date: 'Mayo 05, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600585154526-990dced4db0d?w=500', category: 'Sostenibilidad', date: 'Mayo 05, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600566752355-35792bedcfea?w=500', category: 'Sostenibilidad', date: 'Mayo 05, 2025' }
+                ]
+            },
+            inspiracion: {
+                featured: {
+                    image: 'https://images.unsplash.com/photo-1600607687939-ce8a6c25118c?w=800',
+                    category: 'Inspiración',
+                    date: 'Mayo 07, 2025',
+                    title: 'Diseños que inspiran y transforman espacios',
+                    text: 'Explora las últimas tendencias en diseño de interiores que combinan estética y funcionalidad. Ideas innovadoras para crear ambientes únicos que reflejen tu personalidad y estilo de vida.'
+                },
+                grid: [
+                    { image: 'https://images.unsplash.com/photo-1600566753376-12c8ab7fb75b?w=500', category: 'Inspiración', date: 'Mayo 07, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600585154363-67eb9e2e2099?w=500', category: 'Inspiración', date: 'Mayo 07, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600607688960-e095ff83135d?w=500', category: 'Inspiración', date: 'Mayo 07, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600607687644-aac4c3eac7f4?w=500', category: 'Inspiración', date: 'Mayo 07, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600566752229-250ed79470a1?w=500', category: 'Inspiración', date: 'Mayo 07, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600573472592-401b489a3cdc?w=500', category: 'Inspiración', date: 'Mayo 07, 2025' }
+                ]
+            },
+            artesania: {
+                featured: {
+                    image: 'https://images.unsplash.com/photo-1600573472550-8090b5e0745e?w=800',
+                    category: 'Artesanía',
+                    date: 'Mayo 09, 2025',
+                    title: 'El arte de crear con las manos: tradición y modernidad',
+                    text: 'Sumérgete en el mundo de la artesanía contemporánea. Conoce a los artesanos que mantienen vivas las técnicas tradicionales mientras crean piezas únicas para el hogar moderno.'
+                },
+                grid: [
+                    { image: 'https://images.unsplash.com/photo-1600566753190-17f0baa2a6c3?w=500', category: 'Artesanía', date: 'Mayo 09, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600585154084-4e5fe7c39198?w=500', category: 'Artesanía', date: 'Mayo 09, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600607687920-4e2a09cf159d?w=500', category: 'Artesanía', date: 'Mayo 09, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600566752734-e8e7ed3a3e2c?w=500', category: 'Artesanía', date: 'Mayo 09, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600585152915-d208bec867a1?w=500', category: 'Artesanía', date: 'Mayo 09, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600607688969-a5bfcd646154?w=500', category: 'Artesanía', date: 'Mayo 09, 2025' }
+                ]
+            },
+            comunidad: {
+                featured: {
+                    image: 'https://images.unsplash.com/photo-1600566752355-35792bedcfea?w=800',
+                    category: 'Comunidad',
+                    date: 'Mayo 11, 2025',
+                    title: 'Juntos construimos un futuro mejor para todos',
+                    text: 'Historias inspiradoras de comunidades que trabajan juntas por el cambio. Proyectos colaborativos que demuestran el poder de la acción colectiva y el compromiso social.'
+                },
+                grid: [
+                    { image: 'https://images.unsplash.com/photo-1600880292089-90a7e086ee0c?w=500', category: 'Comunidad', date: 'Mayo 11, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600607687939-ce8a6c25118c?w=500', category: 'Comunidad', date: 'Mayo 11, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600566753151-384129cf4e3e?w=500', category: 'Comunidad', date: 'Mayo 11, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600573472591-ee6b68d14c68?w=500', category: 'Comunidad', date: 'Mayo 11, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?w=500', category: 'Comunidad', date: 'Mayo 11, 2025' },
+                    { image: 'https://images.unsplash.com/photo-1600210492486-724fe5c67fb0?w=500', category: 'Comunidad', date: 'Mayo 11, 2025' }
+                ]
+            }
+        };
+
+        // Data for list articles (3 pages)
+        const listArticlesData = [
+            // Page 1
+            [
+                {
+                    image: 'https://images.unsplash.com/photo-1600566753086-00f18fb6b3ea?w=400',
+                    category: 'Sostenibilidad',
+                    date: 'Mayo 03, 2025',
+                    title: 'Titulo. Lorem ipsum dolor sit amet consectetur'
+                },
+                {
+                    image: 'https://images.unsplash.com/photo-1600566753086-00f18fb6b3ea?w=400',
+                    category: 'Sostenibilidad',
+                    date: 'Mayo 03, 2025',
+                    title: 'Titulo. Lorem ipsum dolor sit amet consectetur'
+                },
+                {
+                    image: 'https://images.unsplash.com/photo-1600566753086-00f18fb6b3ea?w=400',
+                    category: 'Sostenibilidad',
+                    date: 'Mayo 03, 2025',
+                    title: 'Titulo. Lorem ipsum dolor sit amet consectetur'
+                }
+            ],
+            // Page 2
+            [
+                {
+                    image: 'https://images.unsplash.com/photo-1600585154526-990dced4db0d?w=400',
+                    category: 'Inspiración',
+                    date: 'Mayo 04, 2025',
+                    title: 'Nuevo articulo. Lorem ipsum dolor sit amet'
+                },
+                {
+                    image: 'https://images.unsplash.com/photo-1600585154526-990dced4db0d?w=400',
+                    category: 'Inspiración',
+                    date: 'Mayo 04, 2025',
+                    title: 'Otro articulo interesante. Lorem ipsum dolor'
+                },
+                {
+                    image: 'https://images.unsplash.com/photo-1600585154526-990dced4db0d?w=400',
+                    category: 'Inspiración',
+                    date: 'Mayo 04, 2025',
+                    title: 'Más contenido. Lorem ipsum dolor sit amet'
+                }
+            ],
+            // Page 3
+            [
+                {
+                    image: 'https://images.unsplash.com/photo-1600573472550-8090b5e0745e?w=400',
+                    category: 'Artesanía',
+                    date: 'Mayo 05, 2025',
+                    title: 'Artículo de artesanía. Lorem ipsum dolor'
+                },
+                {
+                    image: 'https://images.unsplash.com/photo-1600573472550-8090b5e0745e?w=400',
+                    category: 'Artesanía',
+                    date: 'Mayo 05, 2025',
+                    title: 'Técnicas tradicionales. Lorem ipsum dolor'
+                },
+                {
+                    image: 'https://images.unsplash.com/photo-1600573472550-8090b5e0745e?w=400',
+                    category: 'Artesanía',
+                    date: 'Mayo 05, 2025',
+                    title: 'Trabajo manual. Lorem ipsum dolor sit amet'
+                }
+            ],
+            // Page 4
+            [
+                {
+                    image: 'https://images.unsplash.com/photo-1600566752355-35792bedcfea?w=400',
+                    category: 'Comunidad',
+                    date: 'Mayo 06, 2025',
+                    title: 'Comunidad sostenible. Lorem ipsum dolor'
+                },
+                {
+                    image: 'https://images.unsplash.com/photo-1600566752355-35792bedcfea?w=400',
+                    category: 'Comunidad',
+                    date: 'Mayo 06, 2025',
+                    title: 'Proyectos colaborativos. Lorem ipsum'
+                },
+                {
+                    image: 'https://images.unsplash.com/photo-1600566752355-35792bedcfea?w=400',
+                    category: 'Comunidad',
+                    date: 'Mayo 06, 2025',
+                    title: 'Juntos por el cambio. Lorem ipsum dolor'
+                }
+            ]
+        ];
+
+        let currentPage = 0;
+        let currentCategory = 'todos';
+        const totalPages = listArticlesData.length;
+
+        // Function to render featured article
+        function renderFeatured(category) {
+            const data = categoryData[category].featured;
+            const featured = document.querySelector('.featured');
+            
+            featured.innerHTML = `
+                <img src="${data.image}" alt="Featured" class="featured-image">
+                <div class="featured-content">
+                    <div>
+                        <span class="category">${data.category}</span>
+                        <span class="date">${data.date}</span>
+                    </div>
+                    <h1 class="featured-title">${data.title}</h1>
+                    <p class="featured-text">${data.text}</p>
+                    <p class="featured-text">sit amet consectetur. Id molestie sit sit quis maecenas justo maecenas venenatis diam.</p>
+                    <a href="#" class="read-more">Leer más →</a>
+                </div>
+            `;
+        }
+
+        // Function to render grid articles
+        function renderGrid(category) {
+            const data = categoryData[category].grid;
+            const grid = document.querySelector('.articles-grid');
+            
+            grid.innerHTML = '';
+            
+            data.forEach(article => {
+                const card = `
+                    <div class="article-card">
+                        <img src="${article.image}" alt="Article" class="article-image">
+                        <div class="article-content">
+                            <div>
+                                <span class="category">${article.category}</span>
+                                <span class="date">${article.date}</span>
+                            </div>
+                            <h2 class="article-title">Hogar para un Nómada</h2>
+                            <p class="article-text">Lorem ipsum dolor sit amet consectetur. Id molestie sit sit quis maecenas justo maecenas venenatis diam.</p>
+                            <a href="#" class="read-more">Leer más →</a>
+                        </div>
+                    </div>
+                `;
+                grid.innerHTML += card;
+            });
+        }
+
+        // Function to render list articles
+        function renderListArticles(page) {
+            const container = document.getElementById('list-articles-container');
+            container.innerHTML = '';
+
+            const articles = listArticlesData[page];
+            const listDiv = document.createElement('div');
+            listDiv.className = 'articles-list';
+
+            articles.forEach(article => {
+                const articleHTML = `
+                    <div class="article-list-item">
+                        <img src="${article.image}" alt="Article" class="list-image">
+                        <div class="list-content">
+                            <div>
+                                <span class="category">${article.category}</span>
+                                <span class="date">${article.date}</span>
+                            </div>
+                            <h2 class="list-title">${article.title}</h2>
+                            <p class="article-text">Lorem ipsum dolor sit amet consectetur. Id molestie sit sit quis maecenas justo maecenas venenatis diam. Gravida aliquet montes purus elementum aenean pellentesque ac a congue.Lorem ipsum dolor</p>
+                            <a href="#" class="read-more">Leer más →</a>
+                        </div>
+                    </div>
+                `;
+                listDiv.innerHTML += articleHTML;
+            });
+
+            container.appendChild(listDiv);
+
+            // Update pagination
+            document.getElementById('current-page').textContent = page + 1;
+            document.getElementById('total-pages').textContent = totalPages;
+
+            // Update button states
+            document.getElementById('prev-btn').disabled = page === 0;
+            document.getElementById('next-btn').disabled = page === totalPages - 1;
+        }
+
+        // Function to render all content for a category
+        function renderCategory(category) {
+            currentCategory = category;
+            currentPage = 0; // Reset to first page when changing category
+            
+            renderFeatured(category);
+            renderGrid(category);
+            renderListArticles(currentPage);
+            
+            // Smooth scroll to top
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+
+        // Pagination event listeners
+        document.getElementById('prev-btn').addEventListener('click', () => {
+            if (currentPage > 0) {
+                currentPage--;
+                renderListArticles(currentPage);
+            }
+        });
+
+        document.getElementById('next-btn').addEventListener('click', () => {
+            if (currentPage < totalPages - 1) {
+                currentPage++;
+                renderListArticles(currentPage);
+            }
+        });
+
+        // Category navigation
+        const navItems = document.querySelectorAll('.nav-item');
+        navItems.forEach(item => {
+            item.addEventListener('click', (e) => {
+                e.preventDefault();
+                
+                // Update active state
+                navItems.forEach(nav => nav.classList.remove('active'));
+                item.classList.add('active');
+
+                // Get category and render content
+                const category = item.getAttribute('data-category');
+                renderCategory(category);
+            });
+        });
+
+        // Initialize with "todos" category
+        renderCategory('todos');
+    </script>
+</body>
+</html>

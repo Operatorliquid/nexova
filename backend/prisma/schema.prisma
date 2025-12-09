@@ -1,0 +1,224 @@
+// backend/prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Doctor {
+  id           Int      @id @default(autoincrement())
+  name         String
+  email        String   @unique
+  passwordHash String
+  businessType BusinessType @default(HEALTH)
+  appointmentSlotMinutes Int?
+  availabilityStatus DoctorAvailabilityStatus @default(available)
+
+  specialty     String? 
+  clinicName    String?
+  clinicAddress String?
+  officeDays    String? 
+  officeHours   String? 
+  consultFee    String?
+  emergencyFee  String? 
+  contactPhone  String?
+  extraNotes    String?
+  gender        String?
+  profileImageUrl String?
+  whatsappStatus         WhatsappConnectionStatus @default(disconnected)
+  whatsappBusinessNumber String?
+  whatsappConnectedAt    DateTime?
+  appointments Appointment[]
+  messages     Message[]
+  whatsappNumbers WhatsAppNumber[]
+  patients     Patient[]
+  notes        PatientNote[]
+  documents    PatientDocument[]
+  patientTags  PatientTag[]
+}
+
+enum DoctorAvailabilityStatus {
+  available
+  unavailable
+  vacation
+}
+
+model WhatsAppNumber {
+  id                 String   @id @default(cuid())
+  displayPhoneNumber String   @unique
+  status             WhatsappNumberStatus @default(available)
+  assignedDoctorId   Int?     @unique
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  assignedDoctor     Doctor?  @relation(fields: [assignedDoctorId], references: [id])
+}
+
+enum WhatsappConnectionStatus {
+  disconnected
+  pending
+  connected
+}
+
+enum WhatsappNumberStatus {
+  available
+  reserved
+  assigned
+}
+
+enum BusinessType {
+  HEALTH
+  BEAUTY
+  RETAIL
+}
+
+model Patient {
+  id           Int           @id @default(autoincrement())
+  fullName     String
+  dni          String?       @unique
+  phone        String?
+  insuranceProvider String?
+  consultReason     String?
+  birthDate    DateTime?
+  address      String?
+  occupation   String?
+  maritalStatus String?
+  preferredDayISO   DateTime?
+  preferredHour     Int?
+  doctor       Doctor?       @relation(fields: [doctorId], references: [id])
+  doctorId     Int?
+  needsDni     Boolean @default(false)
+  needsName Boolean  @default(false)
+  needsBirthDate Boolean @default(false)
+  needsAddress Boolean @default(false)
+  needsInsurance Boolean @default(false)
+  needsConsultReason Boolean @default(false)
+  pendingSlotISO DateTime?
+  pendingSlotHumanLabel String?
+  pendingSlotExpiresAt DateTime?
+  pendingSlotReason String?
+  conversationState ConversationState @default(WELCOME)
+  conversationStateData Json?
+  appointments Appointment[]
+  messages     Message[]
+  notes        PatientNote[]
+  documents    PatientDocument[]
+  tags         PatientTag[]
+  createdAt    DateTime @default(now())
+}
+
+model Appointment {
+  id       Int      @id @default(autoincrement())
+  dateTime DateTime
+  type     String
+  status   String
+  price    Int
+  paid     Boolean  @default(false)
+  paymentMethod String?
+  chargedAmount Int?
+  source   AppointmentSource @default(dashboard)
+
+  doctor   Doctor @relation(fields: [doctorId], references: [id])
+  doctorId Int
+
+  patient   Patient @relation(fields: [patientId], references: [id])
+  patientId Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model PatientNote {
+  id        Int      @id @default(autoincrement())
+  content   String
+  patient   Patient  @relation(fields: [patientId], references: [id])
+  patientId Int
+  doctor    Doctor   @relation(fields: [doctorId], references: [id])
+  doctorId  Int
+  createdAt DateTime @default(now())
+}
+
+model PatientDocument {
+  id                Int      @id @default(autoincrement())
+  mediaUrl          String
+  mediaContentType  String?
+  caption           String?
+  sourceMessageId   String?
+  patient           Patient  @relation(fields: [patientId], references: [id])
+  patientId         Int
+  doctor            Doctor   @relation(fields: [doctorId], references: [id])
+  doctorId          Int
+  createdAt         DateTime @default(now())
+  reviewedAt        DateTime?
+}
+
+model PatientTag {
+  id        Int                @id @default(autoincrement())
+  label     String
+  severity  PatientTagSeverity @default(medium)
+  patient   Patient            @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  patientId Int
+  doctor    Doctor             @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  doctorId  Int
+  createdAt DateTime           @default(now())
+}
+
+enum PatientTagSeverity {
+  critical
+  high
+  medium
+  info
+}
+
+
+enum MessageDirection {
+  incoming
+  outgoing
+}
+
+enum MessageType {
+  text
+  template
+  image
+  other
+}
+
+enum ConversationState {
+  WELCOME
+  PROFILE_MENU
+  PROFILE_DNI
+  PROFILE_NAME
+  PROFILE_BIRTHDATE
+  PROFILE_ADDRESS
+  PROFILE_INSURANCE
+  PROFILE_REASON
+  BOOKING_MENU
+  BOOKING_CHOOSE_DAY
+  BOOKING_CHOOSE_SLOT
+  BOOKING_CONFIRM
+  FREE_CHAT
+  UPLOAD_WAITING
+}
+
+model Message {
+  id          Int              @id @default(autoincrement())
+  waMessageId String?          @unique
+  from        String // número que envía (ej: 5492227...)
+  to          String // número del business (tu línea de WhatsApp)
+  direction   MessageDirection
+  type        MessageType
+  body        String?
+  rawPayload  Json? // guardamos el JSON completo del webhook para debug
+  patient     Patient?         @relation(fields: [patientId], references: [id])
+  patientId   Int?
+  doctor      Doctor?          @relation(fields: [doctorId], references: [id])
+  doctorId    Int?
+  createdAt   DateTime         @default(now())
+}
+enum AppointmentSource {
+  dashboard
+  whatsapp
+}
