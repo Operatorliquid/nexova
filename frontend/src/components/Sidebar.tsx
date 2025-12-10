@@ -1,6 +1,6 @@
 // src/components/Sidebar.tsx
 
-type SidebarSection =
+export type SidebarSection =
   | "dashboard"
   | "risk"
   | "agenda"

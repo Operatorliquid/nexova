@@ -1,6 +1,6 @@
 // src/App.tsx
 import "./index.css";
-import Sidebar from "./components/Sidebar";
+import Sidebar, { type SidebarSection } from "./components/Sidebar";
 import Topbar from "./components/Topbar";
 import AuthScreen from "./components/AuthScreen";
 import whatsappIcon from "./assets/whatsappicon.svg";
@@ -1505,14 +1505,12 @@ const automationAppointmentPool = useMemo(() => {
       const queryTokens = normalizedInput.split(" ").filter(Boolean);
       if (queryTokens.length === 0) return null;
       const tokenSet = new Set(queryTokens);
-      let best:
-        | {
-            patient: Patient;
-            matched: number;
-            completeness: number;
-            total: number;
-          }
-        | null = null;
+      let bestPatient: Patient | null = null;
+      let bestStats = {
+        matched: 0,
+        completeness: 0,
+        totalTokens: 0,
+      };
       patients.forEach((patient) => {
         const normalizedName = normalizeSearchText(patient.fullName);
         if (!normalizedName) return;
@@ -1526,23 +1524,24 @@ const automationAppointmentPool = useMemo(() => {
         });
         if (matched === 0) return;
         const completeness = matched / tokens.length;
-        if (
-          !best ||
-          matched > best.matched ||
-          (matched === best.matched && completeness > best.completeness) ||
-          (matched === best.matched &&
-            completeness === best.completeness &&
-            tokens.length > best.total)
-        ) {
-          best = {
-            patient,
+        const shouldReplace =
+          !bestPatient ||
+          matched > bestStats.matched ||
+          (matched === bestStats.matched &&
+            completeness > bestStats.completeness) ||
+          (matched === bestStats.matched &&
+            completeness === bestStats.completeness &&
+            tokens.length > bestStats.totalTokens);
+        if (shouldReplace) {
+          bestPatient = patient;
+          bestStats = {
             matched,
             completeness,
-            total: tokens.length,
+            totalTokens: tokens.length,
           };
         }
       });
-      return best?.patient ?? null;
+      return bestPatient;
     },
     [patients]
   );
@@ -3605,13 +3604,12 @@ const automationAppointmentPool = useMemo(() => {
       const normalizedInput = normalizeSearchText(input);
       if (!normalizedInput) return null;
 
-      type InternalMatch = AutomationAppointmentMatch & {
-        matchedTokens: number;
-        completeness: number;
-        totalTokens: number;
+      let bestCandidate: AutomationAppointmentMatch | null = null;
+      let bestStats = {
+        matchedTokens: 0,
+        completeness: 0,
+        totalTokens: 0,
       };
-
-      let bestMatch: InternalMatch | null = null;
 
       const considerCandidate = (candidate: AutomationAppointmentMatch) => {
         const normalizedName = normalizeSearchText(candidate.patientName);
@@ -3626,17 +3624,17 @@ const automationAppointmentPool = useMemo(() => {
         });
         if (matched === 0) return;
         const completeness = matched / tokens.length;
-        if (
-          !bestMatch ||
-          matched > bestMatch.matchedTokens ||
-          (matched === bestMatch.matchedTokens &&
-            completeness > bestMatch.completeness) ||
-          (matched === bestMatch.matchedTokens &&
-            completeness === bestMatch.completeness &&
-            tokens.length > bestMatch.totalTokens)
-        ) {
-          bestMatch = {
-            ...candidate,
+        const shouldReplace =
+          !bestCandidate ||
+          matched > bestStats.matchedTokens ||
+          (matched === bestStats.matchedTokens &&
+            completeness > bestStats.completeness) ||
+          (matched === bestStats.matchedTokens &&
+            completeness === bestStats.completeness &&
+            tokens.length > bestStats.totalTokens);
+        if (shouldReplace) {
+          bestCandidate = candidate;
+          bestStats = {
             matchedTokens: matched,
             completeness,
             totalTokens: tokens.length,
@@ -3667,10 +3665,7 @@ const automationAppointmentPool = useMemo(() => {
         });
       });
 
-      if (!bestMatch) return null;
-      const { matchedTokens: _matched, completeness: _comp, totalTokens: _total, ...match } =
-        bestMatch;
-      return match;
+      return bestCandidate;
     },
     [automationAppointmentPool, data?.agendaHoy]
   );
@@ -6282,7 +6277,7 @@ return (
                       </div>
                       <button
                         type="button"
-                        onClick={handleOpenBroadcastModal}
+                        onClick={() => handleOpenBroadcastModal()}
                         className="w-full inline-flex items-center justify-center rounded-xl bg-white/15 backdrop-blur px-4 py-2 text-sm font-semibold transition hover:bg-white/25"
                       >
                         Enviar mensaje masivo / segmentado
@@ -7321,7 +7316,9 @@ return (
                     </button>
                     <button
                       type="button"
-                      onClick={handleDownloadClinicalHistory}
+                      onClick={() => {
+                        void handleDownloadClinicalHistory();
+                      }}
                       className="btn btn-primary btn-sm"
                       disabled={!clinicalHistorySnapshot || clinicalHistoryDownloading}
                     >
