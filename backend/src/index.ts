@@ -2516,6 +2516,18 @@ app.get(
         { name: string; quantity: number; revenue: number }
       >();
 
+      const clientAgg = new Map<
+        string,
+        {
+          key: string;
+          name: string;
+          phone?: string | null;
+          orders: number;
+          paidAmount: number;
+          totalAmount: number;
+        }
+      >();
+
       const daily = new Map<
         string,
         { orders: number; paid: number; total: number }
@@ -2548,11 +2560,11 @@ app.get(
         else if (order.customerName) fallbackClients.add(order.customerName.trim());
 
         const dayKey = order.createdAt.toISOString().slice(0, 10);
-        const entry = daily.get(dayKey) || { orders: 0, paid: 0, total: 0 };
-        entry.orders += 1;
-        entry.paid += paid;
-        entry.total += order.totalAmount ?? 0;
-        daily.set(dayKey, entry);
+        const dayEntry = daily.get(dayKey) || { orders: 0, paid: 0, total: 0 };
+        dayEntry.orders += 1;
+        dayEntry.paid += paid;
+        dayEntry.total += order.totalAmount ?? 0;
+        daily.set(dayKey, dayEntry);
 
         order.items.forEach((item) => {
           const name = item.product?.name || "Producto";
@@ -2582,6 +2594,29 @@ app.get(
             promoUsage.set(promo.id, current);
           });
         }
+
+        // Top compradores
+        const clientKey = order.clientId
+          ? `client-${order.clientId}`
+          : order.customerName
+          ? `name-${order.customerName.trim()}`
+          : `order-${order.id}`;
+        const displayName =
+          order.client?.fullName?.trim() ||
+          order.customerName?.trim() ||
+          "Cliente";
+        const clientEntry = clientAgg.get(clientKey) || {
+          key: clientKey,
+          name: displayName,
+          phone: order.client?.phone || null,
+          orders: 0,
+          paidAmount: 0,
+          totalAmount: 0,
+        };
+        clientEntry.orders += 1;
+        clientEntry.paidAmount += paid;
+        clientEntry.totalAmount += order.totalAmount ?? 0;
+        clientAgg.set(clientKey, clientEntry);
       });
 
       const uniqueClients = clientsSet.size || fallbackClients.size;
@@ -2617,6 +2652,19 @@ app.get(
               .sort((a, b) => b[1].uses - a[1].uses)[0]
           : null;
 
+      const topClients = Array.from(clientAgg.values())
+        .sort((a, b) => b.paidAmount - a.paidAmount || b.totalAmount - a.totalAmount)
+        .slice(0, 10)
+        .map((c) => ({
+          name: c.name,
+          phone: c.phone || null,
+          orders: c.orders,
+          paidAmount: Math.round(c.paidAmount),
+          totalAmount: Math.round(c.totalAmount),
+          payRate:
+            c.totalAmount > 0 ? Math.max(0, Math.min(1, c.paidAmount / c.totalAmount)) : 0,
+        }));
+
       res.json({
         totals,
         revenue: {
@@ -2642,6 +2690,7 @@ app.get(
               ? { id: topPromo[0], title: topPromo[1].title, uses: topPromo[1].uses }
               : null,
         },
+        topClients,
       });
     } catch (error) {
       console.error("[Retail metrics]", error);
@@ -3736,6 +3785,50 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
       });
 
       console.log("💾 Mensaje guardado en DB (retail):", savedIncoming.id);
+
+       // Si llegan comprobantes/medios, los guardamos como adjuntos al pedido más reciente
+       if (mediaItems.length > 0) {
+         try {
+           const targetOrder =
+             (await prisma.order.findFirst({
+               where: { doctorId: doctor.id, clientId: retailClient.id },
+               orderBy: { createdAt: "desc" },
+             })) || null;
+
+           if (targetOrder) {
+             for (const media of mediaItems) {
+               if (!media.url) continue;
+               try {
+                 // Descargamos el binario desde Twilio (requiere auth)
+                 const mediaRes = await axios.get(media.url, {
+                   responseType: "arraybuffer",
+                   auth: {
+                     username: TWILIO_ACCOUNT_SID,
+                     password: TWILIO_AUTH_TOKEN,
+                   },
+                 });
+                 const contentType = media.contentType || mediaRes.headers["content-type"] || "image/jpeg";
+                 const base64 = Buffer.from(mediaRes.data).toString("base64");
+                 const dataUri = `data:${contentType};base64,${base64}`;
+                 const filename = media.mediaSid ? `Twilio-${media.mediaSid}` : "Comprobante WhatsApp";
+                 const saved = await saveOrderAttachmentFile(targetOrder.id, dataUri, filename);
+                 await prisma.orderAttachment.create({
+                   data: {
+                     orderId: targetOrder.id,
+                     url: saved.url,
+                     filename: saved.filename,
+                     mimeType: saved.mime,
+                   },
+                 });
+               } catch (err) {
+                 console.warn("[Retail] No se pudo guardar media entrante:", err);
+               }
+             }
+           }
+         } catch (err) {
+           console.warn("[Retail] Error al procesar media entrante:", err);
+         }
+       }
 
       // Disponibilidad general (respeta botones de perfil en retail)
       const doctorAvailabilityStatus = doctor.availabilityStatus || "available";

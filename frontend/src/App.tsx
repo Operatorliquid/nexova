@@ -77,6 +77,14 @@ type RetailMetricsResponse = {
     totalDiscount: number;
     top: { id: number; title: string; uses: number } | null;
   };
+  topClients?: Array<{
+    name: string;
+    phone: string | null;
+    orders: number;
+    paidAmount: number;
+    totalAmount: number;
+    payRate: number;
+  }>;
 };
 
 type AgendaItem = {
@@ -1750,15 +1758,24 @@ const handleProfileFieldChange = useCallback(
     return map;
   }, [products]);
 
+  const productTagOptionsRef = useRef<string[]>([]);
   const productTagOptions = useMemo(() => {
-    const set = new Set<string>();
+    const set = new Set<string>(productTagOptionsRef.current);
     products.forEach((p) => {
       if (Array.isArray(p.tags)) {
         p.tags.forEach((t) => set.add(t.label));
       }
     });
-    return Array.from(set);
+    const arr = Array.from(set);
+    productTagOptionsRef.current = arr;
+    return arr;
   }, [products]);
+
+  const promotionProductList = useMemo(() => {
+    const term = promotionProductSearch.trim().toLowerCase();
+    if (!term) return products;
+    return products.filter((p) => p.name.toLowerCase().includes(term));
+  }, [products, promotionProductSearch]);
 
   const [tagModalOpen, setTagModalOpen] = useState(false);
   const [tagModalPatientId, setTagModalPatientId] = useState<number | null>(
@@ -1999,6 +2016,7 @@ const handleProfileFieldChange = useCallback(
     durationDays: "",
     untilStockOut: false,
   });
+  const [promotionProductSearch, setPromotionProductSearch] = useState("");
   const [promotionSendingId, setPromotionSendingId] = useState<number | null>(null);
   const [promotionSendModalId, setPromotionSendModalId] = useState<number | null>(null);
   const [promotionSendMessage, setPromotionSendMessage] = useState("");
@@ -4185,6 +4203,10 @@ const automationAppointmentPool = useMemo(() => {
               ? { ...product, tags: [json.tag, ...(product.tags || [])] }
               : product
           )
+        );
+        // Refrescamos las opciones únicas de tags visibles inmediatamente
+        productTagOptionsRef.current = Array.from(
+          new Set([json.tag.label, ...productTagOptionsRef.current])
         );
       }
       closeProductTagModal();
@@ -12165,13 +12187,22 @@ return (
                               {promotionForm.productIds.length} seleccionados
                             </span>
                           </div>
+                          <div className="mb-2">
+                            <input
+                              type="text"
+                              value={promotionProductSearch}
+                              onChange={(e) => setPromotionProductSearch(e.target.value)}
+                              placeholder="Buscar producto..."
+                              className="w-full rounded-lg border border-slate-600 bg-slate-900/60 text-xs text-white px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-500"
+                            />
+                          </div>
                           <div className="max-h-44 overflow-y-auto space-y-1 pr-1">
                             {products.length === 0 && (
                               <p className="text-xs text-muted">
                                 No tenés productos cargados.
                               </p>
                             )}
-                            {products.map((prod) => {
+                            {promotionProductList.map((prod) => {
                               const checked = promotionForm.productIds.includes(prod.id);
                               return (
                                 <label
@@ -12556,6 +12587,36 @@ return (
                               Incluye pagos parciales
                             </p>
                           </div>
+                        </div>
+                        <div className="mt-3">
+                          <p className="text-xs uppercase tracking-wide text-muted mb-2">
+                            Top compradores (pagos)
+                          </p>
+                          {retailMetrics.topClients && retailMetrics.topClients.length > 0 ? (
+                            <div className="divide-y divide-slate-800/60 border border-slate-800/60 rounded-xl">
+                              {retailMetrics.topClients.map((c, idx) => (
+                                <div
+                                  key={`${c.name}-${idx}`}
+                                  className="grid grid-cols-12 gap-2 px-3 py-2 text-sm text-slate-100"
+                                >
+                                  <span className="col-span-5 font-semibold truncate">
+                                    #{idx + 1} {c.name}
+                                  </span>
+                                  <span className="col-span-2 text-right text-slate-300">
+                                    {c.orders} ord.
+                                  </span>
+                                  <span className="col-span-3 text-right text-emerald-200">
+                                    ${c.paidAmount.toLocaleString("es-AR")}
+                                  </span>
+                                  <span className="col-span-2 text-right text-[11px] text-slate-400">
+                                    {Math.round((c.payRate || 0) * 100)}% pago
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="text-xs text-muted">Sin datos de compradores aún.</p>
+                          )}
                         </div>
                       </div>
 

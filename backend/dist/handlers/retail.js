@@ -601,8 +601,23 @@ async function handleRetailAgentAction(params) {
     }
     // ✅ Si faltó mapear algún producto, NO guardamos todavía
     if (missingProducts.length > 0) {
-        await sendMessage(`No pude reconocer: ${missingProducts.join(", ")}. ` +
-            `Decime el nombre exacto como figura en el stock (ej: "yerba playadito 1kg").`);
+        // Sugerimos opciones cercanas en el catálogo (ej: "jugo" -> listar jugos)
+        const suggestions = [];
+        for (const miss of missingProducts) {
+            const normMiss = miss.toLowerCase();
+            const candidates = products
+                .filter((p) => p.name.toLowerCase().includes(normMiss))
+                .slice(0, 5)
+                .map((p) => p.name);
+            if (candidates.length) {
+                suggestions.push(`${miss}: ${candidates.join(", ")}`);
+            }
+        }
+        await sendMessage(`No pude reconocer: ${missingProducts.join(", ")}.` +
+            (suggestions.length
+                ? ` Opciones que tengo: ${suggestions.join(" · ")}.`
+                : "") +
+            ` Decime el nombre exacto como figura en el stock (ej: "yerba playadito 1kg").`);
         return true;
     }
     if (resolvedItems.length === 0) {

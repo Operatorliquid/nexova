@@ -1977,12 +1977,13 @@ app.get("/api/commerce/metrics", auth_1.authMiddleware, async (req, res) => {
         const clientsSet = new Set();
         const fallbackClients = new Set();
         const productAgg = new Map();
+        const clientAgg = new Map();
         const daily = new Map();
         const promoUsage = new Map();
         let ordersWithPromo = 0;
         let totalDiscountEstimate = 0;
         orders.forEach((order) => {
-            var _a, _b, _c, _d;
+            var _a, _b, _c, _d, _e, _f, _g, _h, _j;
             const paid = (_a = order.paidAmount) !== null && _a !== void 0 ? _a : 0;
             totalRevenue += (_b = order.totalAmount) !== null && _b !== void 0 ? _b : 0;
             paidRevenue += paid;
@@ -2004,11 +2005,11 @@ app.get("/api/commerce/metrics", auth_1.authMiddleware, async (req, res) => {
             else if (order.customerName)
                 fallbackClients.add(order.customerName.trim());
             const dayKey = order.createdAt.toISOString().slice(0, 10);
-            const entry = daily.get(dayKey) || { orders: 0, paid: 0, total: 0 };
-            entry.orders += 1;
-            entry.paid += paid;
-            entry.total += (_d = order.totalAmount) !== null && _d !== void 0 ? _d : 0;
-            daily.set(dayKey, entry);
+            const dayEntry = daily.get(dayKey) || { orders: 0, paid: 0, total: 0 };
+            dayEntry.orders += 1;
+            dayEntry.paid += paid;
+            dayEntry.total += (_d = order.totalAmount) !== null && _d !== void 0 ? _d : 0;
+            daily.set(dayKey, dayEntry);
             order.items.forEach((item) => {
                 var _a, _b, _c;
                 const name = ((_a = item.product) === null || _a === void 0 ? void 0 : _a.name) || "Producto";
@@ -2036,6 +2037,27 @@ app.get("/api/commerce/metrics", auth_1.authMiddleware, async (req, res) => {
                     promoUsage.set(promo.id, current);
                 });
             }
+            // Top compradores
+            const clientKey = order.clientId
+                ? `client-${order.clientId}`
+                : order.customerName
+                    ? `name-${order.customerName.trim()}`
+                    : `order-${order.id}`;
+            const displayName = ((_f = (_e = order.client) === null || _e === void 0 ? void 0 : _e.fullName) === null || _f === void 0 ? void 0 : _f.trim()) ||
+                ((_g = order.customerName) === null || _g === void 0 ? void 0 : _g.trim()) ||
+                "Cliente";
+            const clientEntry = clientAgg.get(clientKey) || {
+                key: clientKey,
+                name: displayName,
+                phone: ((_h = order.client) === null || _h === void 0 ? void 0 : _h.phone) || null,
+                orders: 0,
+                paidAmount: 0,
+                totalAmount: 0,
+            };
+            clientEntry.orders += 1;
+            clientEntry.paidAmount += paid;
+            clientEntry.totalAmount += (_j = order.totalAmount) !== null && _j !== void 0 ? _j : 0;
+            clientAgg.set(clientKey, clientEntry);
         });
         const uniqueClients = clientsSet.size || fallbackClients.size;
         const products = Array.from(productAgg.values());
@@ -2061,6 +2083,17 @@ app.get("/api/commerce/metrics", auth_1.authMiddleware, async (req, res) => {
             ? Array.from(promoUsage.entries())
                 .sort((a, b) => b[1].uses - a[1].uses)[0]
             : null;
+        const topClients = Array.from(clientAgg.values())
+            .sort((a, b) => b.paidAmount - a.paidAmount || b.totalAmount - a.totalAmount)
+            .slice(0, 10)
+            .map((c) => ({
+            name: c.name,
+            phone: c.phone || null,
+            orders: c.orders,
+            paidAmount: Math.round(c.paidAmount),
+            totalAmount: Math.round(c.totalAmount),
+            payRate: c.totalAmount > 0 ? Math.max(0, Math.min(1, c.paidAmount / c.totalAmount)) : 0,
+        }));
         res.json({
             totals,
             revenue: {
@@ -2085,6 +2118,7 @@ app.get("/api/commerce/metrics", auth_1.authMiddleware, async (req, res) => {
                     ? { id: topPromo[0], title: topPromo[1].title, uses: topPromo[1].uses }
                     : null,
             },
+            topClients,
         });
     }
     catch (error) {
@@ -2951,6 +2985,50 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                 },
             });
             console.log("💾 Mensaje guardado en DB (retail):", savedIncoming.id);
+            // Si llegan comprobantes/medios, los guardamos como adjuntos al pedido más reciente
+            if (mediaItems.length > 0) {
+                try {
+                    const targetOrder = (await prisma_1.prisma.order.findFirst({
+                        where: { doctorId: doctor.id, clientId: retailClient.id },
+                        orderBy: { createdAt: "desc" },
+                    })) || null;
+                    if (targetOrder) {
+                        for (const media of mediaItems) {
+                            if (!media.url)
+                                continue;
+                            try {
+                                // Descargamos el binario desde Twilio (requiere auth)
+                                const mediaRes = await axios_1.default.get(media.url, {
+                                    responseType: "arraybuffer",
+                                    auth: {
+                                        username: TWILIO_ACCOUNT_SID,
+                                        password: TWILIO_AUTH_TOKEN,
+                                    },
+                                });
+                                const contentType = media.contentType || mediaRes.headers["content-type"] || "image/jpeg";
+                                const base64 = Buffer.from(mediaRes.data).toString("base64");
+                                const dataUri = `data:${contentType};base64,${base64}`;
+                                const filename = media.mediaSid ? `Twilio-${media.mediaSid}` : "Comprobante WhatsApp";
+                                const saved = await saveOrderAttachmentFile(targetOrder.id, dataUri, filename);
+                                await prisma_1.prisma.orderAttachment.create({
+                                    data: {
+                                        orderId: targetOrder.id,
+                                        url: saved.url,
+                                        filename: saved.filename,
+                                        mimeType: saved.mime,
+                                    },
+                                });
+                            }
+                            catch (err) {
+                                console.warn("[Retail] No se pudo guardar media entrante:", err);
+                            }
+                        }
+                    }
+                }
+                catch (err) {
+                    console.warn("[Retail] Error al procesar media entrante:", err);
+                }
+            }
             // Disponibilidad general (respeta botones de perfil en retail)
             const doctorAvailabilityStatus = doctor.availabilityStatus || "available";
             if (doctorAvailabilityStatus === "unavailable" || doctorAvailabilityStatus === "vacation") {
