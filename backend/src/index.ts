@@ -1740,7 +1740,7 @@ app.post("/api/auth/register", async (req: Request, res: Response) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({
-      error: "Error al registrar médico",
+      error: "Error al registrar usuario",
     });
   }
 });
