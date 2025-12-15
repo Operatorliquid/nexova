@@ -1,7 +1,10 @@
 import OpenAI from "openai";
 
 type AutomationAction =
-  | { type: "navigate"; target: "orders" | "debts" | "stock" | "promotions" | "clients" }
+  | {
+      type: "navigate";
+      target: "orders" | "debts" | "stock" | "promotions" | "clients" | "profile" | "dashboard";
+    }
   | { type: "send_payment_reminders"; orderIds: number[] }
   | { type: "adjust_stock"; productId?: number; productName?: string; delta?: number; setQuantity?: number }
   | { type: "increase_prices_percent"; productIds?: number[]; percent: number }
@@ -45,7 +48,7 @@ Sos un asistente interno de automatización para un comercio. Recibís una orden
 Reglas importantes:
 - Respondé solo JSON válido (nada de texto afuera).
 - Acciones disponibles: navigate, send_payment_reminders, adjust_stock, increase_prices_percent, broadcast_prompt, noop.
-- Para navegar usá exactamente: {"type":"navigate","target":"promotions"|"orders"|"debts"|"stock"|"clients"} (no uses "view").
+- Para navegar usá exactamente: {"type":"navigate","target":"promotions"|"orders"|"debts"|"stock"|"clients"|"profile"|"dashboard"} (no uses "view").
 - No inventes IDs: usá SOLO los IDs internos que aparecen como "id=123".
 - Para pedidos: "orderIds" SIEMPRE son IDs internos (id=...), NO el #sequenceNumber visible.
 - No agregues acciones extra no pedidas; si el usuario pide una sola cosa, devolvé sólo esa acción (sin recordar deudores ni nada adicional).
@@ -71,7 +74,10 @@ const ACTION_SCHEMA = {
       additionalProperties: false,
       properties: {
         type: { type: "string", const: "navigate" },
-        target: { type: "string", enum: ["orders", "debts", "stock", "promotions", "clients"] },
+        target: {
+          type: "string",
+          enum: ["orders", "debts", "stock", "promotions", "clients", "profile", "dashboard"],
+        },
       },
       required: ["type", "target"],
     },

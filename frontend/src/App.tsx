@@ -2322,6 +2322,17 @@ const [automationMessages, setAutomationMessages] = useState<
   const orderPaymentHydrateRef = useRef<{ orderId: number; version: string } | null>(null);
   const lastInboxRefreshRef = useRef<number>(0);
   const lastOrdersRefreshRef = useRef<number>(0);
+  const openDeleteOrder = useCallback(
+    (orderId: number, opts?: { closeDetail?: boolean }) => {
+      if (opts?.closeDetail) {
+        setOrderModalId(null);
+        setTimeout(() => setOrderDeleteModalId(orderId), 0);
+      } else {
+        setOrderDeleteModalId(orderId);
+      }
+    },
+    []
+  );
   const printOrderReceipt = useCallback(
     (order: CommerceOrder) => {
       if (typeof window === "undefined" || !order) return;
@@ -2500,6 +2511,8 @@ const [automationMessages, setAutomationMessages] = useState<
         "Subí precios de bebidas 10%",
         "Sumá 5 coca al stock",
         "Abrir promociones",
+        "Abrir mi perfil",
+        "Mostrame pedidos nuevos",
       ];
     }
     return [
@@ -4461,7 +4474,7 @@ const automationAppointmentPool = useMemo(() => {
         activeSection === "orders" || activeSection === "dashboard" || activeSection === "debts";
       if (shouldRefreshOrders && now - lastOrdersRefreshRef.current > 15_000) {
         lastOrdersRefreshRef.current = now;
-        fetchOrders({ silent: true });
+        fetchOrders();
       }
     }
   }, [activeSection, token, isRetailBusiness, fetchInboxData, fetchOrders]);
@@ -6435,10 +6448,16 @@ const automationAppointmentPool = useMemo(() => {
         promociones: "promotions",
         clients: "clients",
         clientes: "clients",
+        profile: "profile",
+        perfil: "profile",
+        dashboard: "dashboard",
+        inicio: "dashboard",
       };
 
       const v = map[s] ?? s;
-      return ["orders", "debts", "stock", "promotions", "clients"].includes(v) ? (v as any) : null;
+      return ["orders", "debts", "stock", "promotions", "clients", "profile", "dashboard"].includes(v)
+        ? (v as any)
+        : null;
     };
 
     const expandLegacyShape = (entry: any) => {
@@ -11302,16 +11321,28 @@ return (
                                 ${order.totalAmount.toLocaleString("es-AR")}
                               </span>
                             </div>
-                            <button
-                              type="button"
-                              className="btn btn-outline btn-sm"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setOrderModalId(order.id);
-                              }}
-                            >
-                              Ver pedido completo
-                            </button>
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                className="btn btn-outline btn-sm"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setOrderModalId(order.id);
+                                }}
+                              >
+                                Ver pedido completo
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-ghost btn-sm text-rose-200 hover:text-rose-100"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openDeleteOrder(order.id);
+                                }}
+                              >
+                                Eliminar
+                              </button>
+                            </div>
                           </div>
                         </div>
                       );
@@ -11320,7 +11351,7 @@ return (
                 )}
               </div>
               {orderDeleteModalId !== null && (
-                <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 px-4">
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
                   <div className="w-full max-w-md rounded-2xl bg-white shadow-2xl p-5 space-y-4">
                     <div className="flex items-start justify-between gap-3">
                       <div>
@@ -11407,7 +11438,7 @@ return (
                       return (
                         <div className="space-y-4">
                           <div className="border-b border-slate-200 -mt-3 mb-5">
-                            <div className="flex gap-2">
+                            <div className="flex gap-2 items-center justify-between flex-wrap">
                               {[
                                 { key: "details", label: "Detalle" },
                                 { key: "payments", label: "Pagos" },
@@ -13097,7 +13128,9 @@ return (
                     ¿Qué necesitas?
                   </p>
                   <p className="text-xs text-slate-400">
-                    Pedí recordatorios, resúmenes o abrí módulos sin moverte.
+                    {isRetailBusiness
+                      ? "Pedí recordatorios, actualizá stock, precios o abrí módulos rápido."
+                      : "Pedí recordatorios, resúmenes o abrí módulos sin moverte."}
                   </p>
                 </div>
                 <button
