@@ -122,3 +122,13 @@ function sentenceCase(value: string) {
   const lower = value.toLowerCase();
   return lower.charAt(0).toUpperCase() + lower.slice(1);
 }
+
+// Normaliza DNI: devuelve solo dígitos si tiene longitud esperable, sino null
+export function normalizeDniInput(value?: string | null): string | null {
+  if (!value) return null;
+  const digits = value.replace(/\D/g, "");
+  if (digits.length < 7 || digits.length > 10) {
+    return null;
+  }
+  return digits;
+}

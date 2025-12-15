@@ -7,11 +7,13 @@ if (!connectionString) {
   throw new Error("DATABASE_URL no está definido");
 }
 
+const needsSSL = !connectionString.includes("localhost") && !connectionString.includes("127.0.0.1");
+
 const adapter = new PrismaPg({
   connectionString,
-  ssl: {
-    rejectUnauthorized: false, // opcional si Railway lo requiere
-  },
+  ssl: needsSSL
+    ? { rejectUnauthorized: false }
+    : false,
 });
 
 export const prisma = new PrismaClient({ adapter });

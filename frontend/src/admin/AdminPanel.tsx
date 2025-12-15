@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { buildApiUrl } from "../config";
+import { type BusinessType } from "../businessConfig";
 
 type ServiceStatus = {
   ok: boolean;
@@ -18,13 +19,21 @@ type AdminNumber = {
     name: string;
     email: string;
   } | null;
+  businessType: BusinessType;
 };
 
 const ADMIN_KEY_STORAGE = "med-assist-admin-key";
 
-const defaultForm = {
+type NumberFormState = {
+  displayPhoneNumber: string;
+  status: AdminNumber["status"];
+  businessType: BusinessType;
+};
+
+const defaultForm: NumberFormState = {
   displayPhoneNumber: "",
   status: "available",
+  businessType: "HEALTH",
 };
 
 function formatDisplay(value: string) {
@@ -47,6 +56,8 @@ function AdminPanel() {
   } | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
+  const [activeBusinessType, setActiveBusinessType] =
+    useState<BusinessType>("HEALTH");
 
   const isAuthenticated = useMemo(() => adminKey.trim().length > 0, [adminKey]);
 
@@ -153,6 +164,7 @@ function AdminPanel() {
           body: JSON.stringify({
             displayPhoneNumber: form.displayPhoneNumber.trim(),
             status: form.status,
+            businessType: form.businessType,
           }),
         }
       );
@@ -162,7 +174,7 @@ function AdminPanel() {
         throw new Error(errJson?.error || "No se pudo registrar el número.");
       }
 
-      setForm(defaultForm);
+      setForm({ ...defaultForm, businessType: activeBusinessType });
       await fetchNumbers();
     } catch (err: any) {
       console.error("Error al guardar número:", err);
@@ -180,6 +192,15 @@ function AdminPanel() {
     }
     return "Asignado";
   };
+
+  const filteredNumbers = numbers.filter(
+    (n) => n.businessType === activeBusinessType
+  );
+
+  const businessTypeLabel =
+    activeBusinessType === "HEALTH"
+      ? "Servicios de salud"
+      : "Comercios / retail";
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex">
@@ -282,23 +303,57 @@ function AdminPanel() {
               </section>
 
               <section className="bg-white rounded-2xl shadow-soft border border-slate-100 p-5">
-                <div className="flex items-center justify-between mb-4">
-                  <div>
-                    <h2 className="text-lg font-semibold">
-                      Números conectados
-                    </h2>
-                    <p className="text-sm text-slate-500">
-                      Gestioná la pool de senders de Twilio. Cuando un médico se
-                      conecte, verá estos números como disponibles.
-                    </p>
+                <div className="flex flex-col gap-3 mb-4">
+                  <div className="flex items-start justify-between gap-3 flex-wrap">
+                    <div>
+                      <h2 className="text-lg font-semibold">
+                        Números conectados
+                      </h2>
+                      <p className="text-sm text-slate-500">
+                        Gestioná la pool de senders de Twilio segmentada por vertical.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="inline-flex rounded-xl border border-slate-200 overflow-hidden text-xs font-semibold">
+                        {[
+                          { key: "HEALTH", label: "Servicios de salud" },
+                          { key: "RETAIL", label: "Comercios" },
+                        ].map((tab) => {
+                          const active = activeBusinessType === tab.key;
+                          return (
+                            <button
+                              key={tab.key}
+                              type="button"
+                              onClick={() => {
+                                setActiveBusinessType(tab.key as BusinessType);
+                                setForm((prev) => ({
+                                  ...prev,
+                                  businessType: tab.key as BusinessType,
+                                }));
+                              }}
+                              className={`px-3 py-1.5 transition ${
+                                active
+                                  ? "bg-slate-900 text-white"
+                                  : "bg-white text-slate-600 hover:bg-slate-50"
+                              }`}
+                            >
+                              {tab.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <button
+                        onClick={fetchNumbers}
+                        className="text-xs px-3 py-1 rounded-lg border border-slate-200 hover:bg-slate-50"
+                        disabled={loading}
+                      >
+                        {loading ? "Actualizando..." : "Actualizar"}
+                      </button>
+                    </div>
                   </div>
-                  <button
-                    onClick={fetchNumbers}
-                    className="text-xs px-3 py-1 rounded-lg border border-slate-200 hover:bg-slate-50"
-                    disabled={loading}
-                  >
-                    {loading ? "Actualizando..." : "Actualizar"}
-                  </button>
+                  <p className="text-xs text-slate-500">
+                    Los números de <span className="font-semibold">{businessTypeLabel}</span> solo se muestran a cuentas de ese segmento.
+                  </p>
                 </div>
                 {error && (
                   <p className="text-xs text-rose-600 mb-3">{error}</p>
@@ -308,28 +363,34 @@ function AdminPanel() {
                     <thead>
                       <tr className="text-left text-xs text-slate-500 uppercase tracking-wide border-b border-slate-100">
                         <th className="py-2 pr-3">Número</th>
+                        <th className="py-2 pr-3">Segmento</th>
                         <th className="py-2 pr-3">Estado</th>
                         <th className="py-2">Asignado a</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {numbers.length === 0 && (
+                      {filteredNumbers.length === 0 && (
                         <tr>
                           <td
-                            colSpan={3}
+                            colSpan={4}
                             className="py-4 text-center text-slate-500 text-xs"
                           >
-                            Todavía no cargaste números.
+                            Todavía no cargaste números en esta vertical.
                           </td>
                         </tr>
                       )}
-                      {numbers.map((number) => (
+                      {filteredNumbers.map((number) => (
                         <tr
                           key={number.id}
                           className="border-b border-slate-100 text-sm"
                         >
                           <td className="py-2 pr-3 font-medium text-slate-900">
                             {formatDisplay(number.displayPhoneNumber)}
+                          </td>
+                          <td className="py-2 pr-3">
+                            <span className="px-2 py-0.5 rounded-full text-[11px] border border-slate-200 bg-slate-50 text-slate-700">
+                              {number.businessType === "HEALTH" ? "Salud" : "Retail"}
+                            </span>
                           </td>
                           <td className="py-2 pr-3">
                             <span
@@ -397,6 +458,24 @@ function AdminPanel() {
                     >
                       <option value="available">Disponible</option>
                       <option value="reserved">Reservado</option>
+                    </select>
+                  </div>
+                  <div className="md:col-span-1">
+                    <label className="block text-xs font-medium text-slate-600 mb-1">
+                      Segmento
+                    </label>
+                    <select
+                      value={form.businessType}
+                      onChange={(e) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          businessType: e.target.value as BusinessType,
+                        }))
+                      }
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-slate-900/5"
+                    >
+                      <option value="HEALTH">Servicios de salud</option>
+                      <option value="RETAIL">Comercios / retail</option>
                     </select>
                   </div>
                   <div className="md:col-span-3 flex justify-end gap-2 pt-2">

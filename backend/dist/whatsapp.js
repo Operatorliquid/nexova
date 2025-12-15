@@ -49,7 +49,7 @@ async function checkTwilioConnectivity() {
 /**
  * Envía un mensaje usando Twilio WhatsApp.
  */
-async function sendWhatsAppText(to, body, credentials) {
+async function sendWhatsAppText(to, body, credentials, mediaUrl) {
     if (!TWILIO_API_URL || !TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
         throw new Error("Twilio no está configurado. Completá TWILIO_ACCOUNT_SID y TWILIO_AUTH_TOKEN en el .env");
     }
@@ -62,6 +62,9 @@ async function sendWhatsAppText(to, body, credentials) {
     params.set("To", normalizedTo);
     params.set("From", sender);
     params.set("Body", body);
+    if (mediaUrl) {
+        params.set("MediaUrl", mediaUrl);
+    }
     const response = await axios_1.default.post(TWILIO_API_URL, params.toString(), {
         headers: {
             "Content-Type": "application/x-www-form-urlencoded",

@@ -1,13 +1,19 @@
 // src/components/Sidebar.tsx
+import logoWhite from "../assets/logo-white.svg";
 
 export type SidebarSection =
+  | "stock"
   | "dashboard"
   | "risk"
   | "agenda"
+  | "orders"
+  | "debts"
   | "patients"
   | "history"
   | "metrics"
   | "documents"
+  | "attachments"
+  | "promotions"
   | "profile";
 
 interface SidebarProps {
@@ -17,6 +23,7 @@ interface SidebarProps {
   businessLabel: string;
   businessShort: string;
   contactPluralLabel: string;
+  sections: { key: SidebarSection; label: string }[];
   whatsappStatus: "connected" | "pending" | "disconnected";
   whatsappNumber: string | null;
   whatsappLoading: boolean;
@@ -34,6 +41,7 @@ function Sidebar({
   businessLabel,
   businessShort,
   contactPluralLabel,
+  sections,
   whatsappStatus,
   whatsappNumber,
   whatsappLoading,
@@ -73,41 +81,37 @@ function Sidebar({
     }
   };
 
-  const initials = doctorName
-    .split(" ")
-    .map((p) => p[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
   return (
     <aside
       className={`flex flex-col w-64 bg-[#121212] border-r border-[#262626] px-6 py-6 gap-8 ${className}`.trim()}
     >
-      <div className="flex items-center gap-3">
-        <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-[#39F3D7] to-[#68AFDD] flex items-center justify-center text-[#031816] font-semibold shadow-lg shadow-[#39F3D780]">
-          {initials || businessShort}
-        </div>
-        <div>
-          <p className="text-sm font-semibold text-white">{businessLabel}</p>
-          <p className="text-xs text-muted">Panel del profesional</p>
-        </div>
+      <div className="flex items-center justify-start">
+        <img
+          src={logoWhite}
+          alt={`${businessLabel || doctorName || businessShort} logo`}
+          className="w-32 h-auto"
+        />
       </div>
 
       <nav className="flex flex-col gap-2 text-sm">
         <span className="text-[11px] uppercase tracking-wide text-muted">
           Navegación
         </span>
-        {(
-          [
+        {(sections.length
+          ? sections
+        : ([
             { key: "dashboard", label: "Dashboard" },
             { key: "risk", label: "Radar crítico" },
             { key: "agenda", label: "Agenda & Turnos" },
+            { key: "orders", label: "Pedidos" },
+            { key: "promotions", label: "Promociones" },
+            { key: "debts", label: "Seguimiento de deudas" },
             { key: "patients", label: contactPluralLabel },
             { key: "history", label: "Historia clínica" },
             { key: "metrics", label: "Métricas" },
-            { key: "documents", label: "Documentos" },
+            { key: "attachments", label: "Comprobantes" },
             { key: "profile", label: "Mi perfil" },
-          ] as { key: SidebarSection; label: string }[]
+            ] as { key: SidebarSection; label: string }[])
         ).map((item) => {
           const active = activeSection === item.key;
           return (

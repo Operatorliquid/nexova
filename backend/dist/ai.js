@@ -8,6 +8,7 @@ exports.runWhatsappAgent = runWhatsappAgent;
 // backend/src/ai.ts
 const openai_1 = __importDefault(require("openai"));
 const healthAgent_1 = require("./agents/healthAgent");
+const retailAgent_1 = require("./agents/retailAgent");
 const text_1 = require("./utils/text");
 const openaiClient = process.env.OPENAI_API_KEY
     ? new openai_1.default({ apiKey: process.env.OPENAI_API_KEY })
@@ -49,6 +50,16 @@ async function runWhatsappAgent(ctx) {
     if (!text) {
         return {
             replyToPatient: "Te leo, ¿podés escribirme en texto para ayudarte mejor?",
+            action: { type: "NONE" },
+        };
+    }
+    // Rama retail: no slots ni agenda
+    if (ctx.businessType === "RETAIL") {
+        const retailResult = await runDomainAgent(ctx);
+        if (retailResult)
+            return retailResult;
+        return {
+            replyToPatient: "Contame qué querés pedir o preguntá por stock/precios y te ayudo.",
             action: { type: "NONE" },
         };
     }
@@ -114,21 +125,41 @@ async function runWhatsappAgent(ctx) {
     if (llmResult) {
         return llmResult;
     }
-    // 3) Fallback heurístico (por si el modelo falla o no hay key)
-    return simpleHeuristicAgent(ctx);
+    // 3) Fallback informativo mínimo si el modelo no responde.
+    const infoReply = buildInformationalFallback(ctx);
+    if (infoReply) {
+        return {
+            replyToPatient: infoReply,
+            action: { type: "NONE" },
+        };
+    }
+    return {
+        replyToPatient: "En este momento no puedo revisar la agenda automáticamente. Contame qué necesitás y lo reviso enseguida.",
+        action: { type: "NONE" },
+    };
 }
 async function runDomainAgent(ctx) {
-    var _a, _b, _c, _d, _e, _f;
+    var _a, _b, _c, _d, _e, _f, _g;
     if (!openaiClient)
         return null;
     let execution = null;
     if (ctx.businessType === "HEALTH") {
         execution = await (0, healthAgent_1.runHealthAgent)(ctx, openaiClient);
     }
+    else if (ctx.businessType === "RETAIL") {
+        execution = await (0, retailAgent_1.runRetailAgent)(ctx, openaiClient);
+    }
     if (!execution)
         return null;
+    if (ctx.businessType === "RETAIL") {
+        return {
+            replyToPatient: execution.replyToPatient,
+            action: execution.action,
+            profileUpdates: (_a = execution.profileUpdates) !== null && _a !== void 0 ? _a : null,
+        };
+    }
     const action = execution.action;
-    const profileUpdates = (_b = (_a = execution.profileUpdates) !== null && _a !== void 0 ? _a : execution.action.profileUpdates) !== null && _b !== void 0 ? _b : null;
+    const profileUpdates = (_c = (_b = execution.profileUpdates) !== null && _b !== void 0 ? _b : execution.action.profileUpdates) !== null && _c !== void 0 ? _c : null;
     if (action.type === "offer_slots") {
         return {
             replyToPatient: execution.replyToPatient,
@@ -136,14 +167,14 @@ async function runDomainAgent(ctx) {
                 type: "LIST_SLOTS",
                 reply: execution.replyToPatient,
                 slots: action.slots,
-                reason: (_c = action.reason) !== null && _c !== void 0 ? _c : null,
+                reason: (_d = action.reason) !== null && _d !== void 0 ? _d : null,
                 profileUpdates,
             },
-            pendingSlotHint: ((_d = action.slots) === null || _d === void 0 ? void 0 : _d[0])
+            pendingSlotHint: ((_e = action.slots) === null || _e === void 0 ? void 0 : _e[0])
                 ? {
                     startISO: action.slots[0].startISO,
                     humanLabel: action.slots[0].humanLabel,
-                    reason: (_e = action.reason) !== null && _e !== void 0 ? _e : null,
+                    reason: (_f = action.reason) !== null && _f !== void 0 ? _f : null,
                 }
                 : undefined,
             profileUpdates,
@@ -155,7 +186,7 @@ async function runDomainAgent(ctx) {
         if (!slotToConfirm && ctx.patientProfile.pendingSlotISO) {
             slotToConfirm = {
                 startISO: ctx.patientProfile.pendingSlotISO,
-                humanLabel: (_f = ctx.patientProfile.pendingSlotHumanLabel) !== null && _f !== void 0 ? _f : "el turno pendiente",
+                humanLabel: (_g = ctx.patientProfile.pendingSlotHumanLabel) !== null && _g !== void 0 ? _g : "el turno pendiente",
             };
         }
         const slotISO = (slotToConfirm === null || slotToConfirm === void 0 ? void 0 : slotToConfirm.startISO) || ctx.patientProfile.pendingSlotISO || null;
@@ -211,6 +242,108 @@ async function runDomainAgent(ctx) {
     }
     return null;
 }
+function buildInformationalFallback(ctx) {
+    var _a, _b;
+    if (ctx.businessType === "RETAIL")
+        return null;
+    const text = (_a = ctx.text) === null || _a === void 0 ? void 0 : _a.trim();
+    if (!text)
+        return null;
+    const lower = text.toLowerCase();
+    const profile = ctx.doctorProfile;
+    const asksPrice = lower.includes("precio") ||
+        lower.includes("valor") ||
+        lower.includes("cuánto sale") ||
+        lower.includes("cuanto sale") ||
+        lower.includes("cuánto cuesta") ||
+        lower.includes("cuanto cuesta") ||
+        lower.includes("cobrás") ||
+        lower.includes("cobras");
+    if (asksPrice) {
+        const normal = profile.consultationPrice;
+        const emergency = profile.emergencyConsultationPrice;
+        if (normal && emergency) {
+            return `La consulta estándar cuesta $ ${normal.toLocaleString("es-AR")} y la de urgencia $ ${emergency.toLocaleString("es-AR")}. Si necesitás otro dato, decime.`;
+        }
+        if (normal) {
+            return `La consulta cuesta $ ${normal.toLocaleString("es-AR")}. Cualquier otra duda me avisás.`;
+        }
+        return null;
+    }
+    const asksSchedule = lower.includes("horario") ||
+        lower.includes("horarios") ||
+        lower.includes("atienden") ||
+        lower.includes("atiende") ||
+        lower.includes("abren") ||
+        lower.includes("cierran") ||
+        lower.includes("días") ||
+        lower.includes("dias");
+    if (asksSchedule && (profile.officeDays || profile.officeHours)) {
+        const parts = [];
+        if (profile.officeDays)
+            parts.push(`atiende ${profile.officeDays}`);
+        if (profile.officeHours)
+            parts.push(`en el horario ${profile.officeHours}`);
+        return `La doctora ${ctx.doctorName} ${parts.join(" ") || "tiene horario flexible"}.`;
+    }
+    const asksAddress = lower.includes("direccion") ||
+        lower.includes("dirección") ||
+        lower.includes("ubicacion") ||
+        lower.includes("ubicación") ||
+        lower.includes("donde queda") ||
+        lower.includes("dónde queda") ||
+        lower.includes("donde atiende") ||
+        lower.includes("dónde atiende");
+    if (asksAddress && (profile.officeAddress || profile.clinicName)) {
+        const location = [profile.clinicName, profile.officeAddress]
+            .filter(Boolean)
+            .join(" - ");
+        return `El consultorio queda en ${location}.`;
+    }
+    const asksContact = lower.includes("telefono") ||
+        lower.includes("teléfono") ||
+        lower.includes("celu") ||
+        lower.includes("whatsapp") ||
+        lower.includes("número") ||
+        lower.includes("numero");
+    if (asksContact && profile.contactPhone) {
+        return `Podés comunicarte al ${profile.contactPhone} o seguir por acá para cualquier consulta.`;
+    }
+    const asksSpecialty = lower.includes("especialidad") ||
+        lower.includes("especialista") ||
+        lower.includes("qué doctor") ||
+        lower.includes("que doctor");
+    if (asksSpecialty && profile.specialty) {
+        return `La doctora ${ctx.doctorName} es especialista en ${profile.specialty}.`;
+    }
+    const asksDuration = lower.includes("cuanto dura") ||
+        lower.includes("cuánto dura") ||
+        lower.includes("duracion") ||
+        lower.includes("duración") ||
+        lower.includes("dura la consulta") ||
+        lower.includes("dura un turno");
+    if (asksDuration) {
+        const minutes = (_b = profile.slotMinutes) !== null && _b !== void 0 ? _b : null;
+        if (minutes && minutes > 0) {
+            const formatted = minutes % 60 === 0
+                ? `${minutes / 60} hora${minutes === 60 ? "" : "s"}`
+                : `${minutes} minutos`;
+            return `Cada turno dura aproximadamente ${formatted}.`;
+        }
+        return "Los turnos suelen durar entre 30 y 60 minutos, según la consulta.";
+    }
+    const asksNotes = lower.includes("indicacion") ||
+        lower.includes("indicación") ||
+        lower.includes("preparacion") ||
+        lower.includes("preparación") ||
+        lower.includes("nota") ||
+        lower.includes("recomendacion") ||
+        lower.includes("recomendación");
+    if (asksNotes && profile.additionalNotes) {
+        return profile.additionalNotes;
+    }
+    return null;
+}
 /**
  * Fallback heurístico:
  * - Detecta si el mensaje habla de turno.
@@ -218,6 +351,7 @@ async function runDomainAgent(ctx) {
  * - Devuelve acción CREATE_APPOINTMENT.
  */
 function simpleHeuristicAgent(ctx) {
+    var _a;
     const text = ctx.text;
     const lower = text.toLowerCase();
     const profile = ctx.doctorProfile;
@@ -268,6 +402,13 @@ function simpleHeuristicAgent(ctx) {
         lower.includes("nota") ||
         lower.includes("recomendacion") ||
         lower.includes("recomendación");
+    const asksDuration = lower.includes("cuanto dura") ||
+        lower.includes("cuánto dura") ||
+        lower.includes("duracion") ||
+        lower.includes("duración") ||
+        lower.includes("dura un turno") ||
+        lower.includes("dura la consulta") ||
+        lower.includes("dura la cita");
     const acceptanceRegex = /(me sirve|lo tomo|lo tomamos|confirmo|perfecto ese|queda ese|agendalo|agéndalo|dale ese|está bien ese|ese me va|de una)/;
     const acceptance = acceptanceRegex.test(lower);
     const lastDoctorMessage = [...ctx.recentMessages]
@@ -366,6 +507,26 @@ function simpleHeuristicAgent(ctx) {
     if (asksNotes && profile.additionalNotes) {
         return {
             replyToPatient: `${profile.additionalNotes} ¿Querés que avancemos con un turno?`,
+            action: { type: "NONE" },
+        };
+    }
+    if (asksDuration) {
+        const minutes = (_a = profile.slotMinutes) !== null && _a !== void 0 ? _a : null;
+        if (minutes && minutes > 0) {
+            const hours = minutes / 60;
+            const formatted = minutes % 60 === 0
+                ? `${hours.toLocaleString("es-AR", {
+                    minimumFractionDigits: 0,
+                    maximumFractionDigits: 2,
+                })} hora${hours === 1 ? "" : "s"}`
+                : `${minutes} minutos`;
+            return {
+                replyToPatient: `Cada turno dura aproximadamente ${formatted}. Cuando quieras te paso horarios disponibles para agendar.`,
+                action: { type: "NONE" },
+            };
+        }
+        return {
+            replyToPatient: "Los turnos suelen durar entre 30 y 60 minutos según el caso. Avisame si querés coordinar uno en particular.",
             action: { type: "NONE" },
         };
     }

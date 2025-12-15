@@ -9,35 +9,43 @@ datasource db {
 }
 
 model Doctor {
-  id           Int      @id @default(autoincrement())
-  name         String
-  email        String   @unique
-  passwordHash String
-  businessType BusinessType @default(HEALTH)
+  id                     Int                      @id @default(autoincrement())
+  name                   String
+  email                  String                   @unique
+  passwordHash           String
+  businessType           BusinessType             @default(HEALTH)
   appointmentSlotMinutes Int?
-  availabilityStatus DoctorAvailabilityStatus @default(available)
+  availabilityStatus     DoctorAvailabilityStatus @default(available)
 
-  specialty     String? 
-  clinicName    String?
-  clinicAddress String?
-  officeDays    String? 
-  officeHours   String? 
-  consultFee    String?
-  emergencyFee  String? 
-  contactPhone  String?
-  extraNotes    String?
-  gender        String?
-  profileImageUrl String?
+  specialty              String?
+  clinicName             String?
+  clinicAddress          String?
+  ticketLogoUrl          String?
+  officeDays             String?
+  officeHours            String?
+  consultFee             String?
+  emergencyFee           String?
+  contactPhone           String?
+  extraNotes             String?
+  gender                 String?
+  profileImageUrl        String?
   whatsappStatus         WhatsappConnectionStatus @default(disconnected)
   whatsappBusinessNumber String?
   whatsappConnectedAt    DateTime?
-  appointments Appointment[]
-  messages     Message[]
-  whatsappNumbers WhatsAppNumber[]
-  patients     Patient[]
-  notes        PatientNote[]
-  documents    PatientDocument[]
-  patientTags  PatientTag[]
+  appointments           Appointment[]
+  messages               Message[]
+  whatsappNumbers        WhatsAppNumber[]
+  patients               Patient[]
+  notes                  PatientNote[]
+  documents              PatientDocument[]
+  patientTags            PatientTag[]
+  products               Product[]
+  productTags            ProductTag[]
+  retailClients          RetailClient[]
+  orders                 Order[]
+  retailClientNotes      RetailClientNote[]
+  promotions             Promotion[]
+  retailClientTags       RetailClientTag[]
 }
 
 enum DoctorAvailabilityStatus {
@@ -47,14 +55,116 @@ enum DoctorAvailabilityStatus {
 }
 
 model WhatsAppNumber {
-  id                 String   @id @default(cuid())
-  displayPhoneNumber String   @unique
+  id                 String               @id @default(cuid())
+  displayPhoneNumber String               @unique
   status             WhatsappNumberStatus @default(available)
-  assignedDoctorId   Int?     @unique
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  assignedDoctorId   Int?                 @unique
+  businessType       BusinessType         @default(HEALTH)
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
 
-  assignedDoctor     Doctor?  @relation(fields: [assignedDoctorId], references: [id])
+  assignedDoctor Doctor? @relation(fields: [assignedDoctorId], references: [id])
+}
+
+model RetailClient {
+  id              Int                @id @default(autoincrement())
+  fullName        String
+  dni             String?
+  businessAddress String?
+  phone           String?
+  doctor          Doctor             @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  doctorId        Int
+  patient         Patient?           @relation("PatientRetailClient", fields: [patientId], references: [id], onDelete: SetNull)
+  patientId       Int?               @unique
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+  orders          Order[]
+  messages        Message[]
+  notes           RetailClientNote[]
+  tags            RetailClientTag[]
+}
+
+model Order {
+  id              Int           @id @default(autoincrement())
+  sequenceNumber  Int
+  status          OrderStatus   @default(pending)
+  totalAmount     Int           @default(0)
+  customerName    String
+  customerAddress String?
+  customerDni     String?
+  customerConfirmed   Boolean   @default(false)
+  customerConfirmedAt DateTime?
+  inventoryDeducted   Boolean   @default(false)
+  inventoryDeductedAt DateTime?
+  paymentStatus       String    @default("unpaid")
+  paidAmount          Int       @default(0)
+  doctor          Doctor        @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  doctorId        Int
+  client          RetailClient? @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  clientId        Int?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  items           OrderItem[]
+  attachments     OrderAttachment[]
+  promotions      Promotion[]   @relation("OrderPromotions")
+}
+
+model RetailClientTag {
+  id        Int                @id @default(autoincrement())
+  label     String
+  severity  PatientTagSeverity @default(medium)
+  client    RetailClient       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  clientId  Int
+  doctor    Doctor             @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  doctorId  Int
+  createdAt DateTime           @default(now())
+}
+
+model OrderItem {
+  id        Int     @id @default(autoincrement())
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId   Int
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId Int
+  quantity  Int
+  unitPrice Int
+}
+
+model OrderAttachment {
+  id        Int      @id @default(autoincrement())
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId   Int
+  url       String
+  filename  String?
+  mimeType  String
+  createdAt DateTime @default(now())
+}
+
+model Promotion {
+  id               Int      @id @default(autoincrement())
+  doctor           Doctor   @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  doctorId         Int
+  title            String
+  description      String?
+  discountType     String   // "amount" (monto fijo) o "percent"
+  discountValue    Int
+  productIds       Json
+  productTagLabels String[]
+  imageUrl         String?
+  durationDays     Int?
+  untilStockOut    Boolean  @default(false)
+  startDate        DateTime @default(now())
+  endDate          DateTime?
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  orders           Order[]  @relation("OrderPromotions")
+}
+
+enum OrderStatus {
+  pending
+  confirmed
+  cancelled
 }
 
 enum WhatsappConnectionStatus {
@@ -76,50 +186,51 @@ enum BusinessType {
 }
 
 model Patient {
-  id           Int           @id @default(autoincrement())
-  fullName     String
-  dni          String?       @unique
-  phone        String?
-  insuranceProvider String?
-  consultReason     String?
-  birthDate    DateTime?
-  address      String?
-  occupation   String?
-  maritalStatus String?
-  preferredDayISO   DateTime?
-  preferredHour     Int?
-  doctor       Doctor?       @relation(fields: [doctorId], references: [id])
-  doctorId     Int?
-  needsDni     Boolean @default(false)
-  needsName Boolean  @default(false)
-  needsBirthDate Boolean @default(false)
-  needsAddress Boolean @default(false)
-  needsInsurance Boolean @default(false)
-  needsConsultReason Boolean @default(false)
-  pendingSlotISO DateTime?
+  id                    Int               @id @default(autoincrement())
+  fullName              String
+  dni                   String?           @unique
+  phone                 String?
+  insuranceProvider     String?
+  consultReason         String?
+  birthDate             DateTime?
+  address               String?
+  occupation            String?
+  maritalStatus         String?
+  preferredDayISO       DateTime?
+  preferredHour         Int?
+  doctor                Doctor?           @relation(fields: [doctorId], references: [id])
+  doctorId              Int?
+  needsDni              Boolean           @default(false)
+  needsName             Boolean           @default(false)
+  needsBirthDate        Boolean           @default(false)
+  needsAddress          Boolean           @default(false)
+  needsInsurance        Boolean           @default(false)
+  needsConsultReason    Boolean           @default(false)
+  pendingSlotISO        DateTime?
   pendingSlotHumanLabel String?
-  pendingSlotExpiresAt DateTime?
-  pendingSlotReason String?
-  conversationState ConversationState @default(WELCOME)
+  pendingSlotExpiresAt  DateTime?
+  pendingSlotReason     String?
+  conversationState     ConversationState @default(WELCOME)
   conversationStateData Json?
-  appointments Appointment[]
-  messages     Message[]
-  notes        PatientNote[]
-  documents    PatientDocument[]
-  tags         PatientTag[]
-  createdAt    DateTime @default(now())
+  appointments          Appointment[]
+  messages              Message[]
+  notes                 PatientNote[]
+  documents             PatientDocument[]
+  tags                  PatientTag[]
+  retailClient          RetailClient?     @relation("PatientRetailClient")
+  createdAt             DateTime          @default(now())
 }
 
 model Appointment {
-  id       Int      @id @default(autoincrement())
-  dateTime DateTime
-  type     String
-  status   String
-  price    Int
-  paid     Boolean  @default(false)
+  id            Int               @id @default(autoincrement())
+  dateTime      DateTime
+  type          String
+  status        String
+  price         Int
+  paid          Boolean           @default(false)
   paymentMethod String?
   chargedAmount Int?
-  source   AppointmentSource @default(dashboard)
+  source        AppointmentSource @default(dashboard)
 
   doctor   Doctor @relation(fields: [doctorId], references: [id])
   doctorId Int
@@ -141,18 +252,28 @@ model PatientNote {
   createdAt DateTime @default(now())
 }
 
+model RetailClientNote {
+  id             Int          @id @default(autoincrement())
+  content        String
+  retailClient   RetailClient @relation(fields: [retailClientId], references: [id], onDelete: Cascade)
+  retailClientId Int
+  doctor         Doctor       @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  doctorId       Int
+  createdAt      DateTime     @default(now())
+}
+
 model PatientDocument {
-  id                Int      @id @default(autoincrement())
-  mediaUrl          String
-  mediaContentType  String?
-  caption           String?
-  sourceMessageId   String?
-  patient           Patient  @relation(fields: [patientId], references: [id])
-  patientId         Int
-  doctor            Doctor   @relation(fields: [doctorId], references: [id])
-  doctorId          Int
-  createdAt         DateTime @default(now())
-  reviewedAt        DateTime?
+  id               Int       @id @default(autoincrement())
+  mediaUrl         String
+  mediaContentType String?
+  caption          String?
+  sourceMessageId  String?
+  patient          Patient   @relation(fields: [patientId], references: [id])
+  patientId        Int
+  doctor           Doctor    @relation(fields: [doctorId], references: [id])
+  doctorId         Int
+  createdAt        DateTime  @default(now())
+  reviewedAt       DateTime?
 }
 
 model PatientTag {
@@ -173,6 +294,32 @@ enum PatientTagSeverity {
   info
 }
 
+model Product {
+  id          Int          @id @default(autoincrement())
+  name        String
+  description String?
+  imageUrl    String?
+  price       Int          @default(0)
+  quantity    Int          @default(0)
+  categories  String[]     @default([])
+  doctor      Doctor       @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  doctorId    Int
+  tags        ProductTag[]
+  orderItems  OrderItem[]
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+}
+
+model ProductTag {
+  id        Int                @id @default(autoincrement())
+  label     String
+  severity  PatientTagSeverity @default(medium)
+  product   Product            @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId Int
+  doctor    Doctor             @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  doctorId  Int
+  createdAt DateTime           @default(now())
+}
 
 enum MessageDirection {
   incoming
@@ -204,20 +351,23 @@ enum ConversationState {
 }
 
 model Message {
-  id          Int              @id @default(autoincrement())
-  waMessageId String?          @unique
-  from        String // número que envía (ej: 5492227...)
-  to          String // número del business (tu línea de WhatsApp)
-  direction   MessageDirection
-  type        MessageType
-  body        String?
-  rawPayload  Json? // guardamos el JSON completo del webhook para debug
-  patient     Patient?         @relation(fields: [patientId], references: [id])
-  patientId   Int?
-  doctor      Doctor?          @relation(fields: [doctorId], references: [id])
-  doctorId    Int?
-  createdAt   DateTime         @default(now())
+  id             Int              @id @default(autoincrement())
+  waMessageId    String?          @unique
+  from           String // número que envía (ej: 5492227...)
+  to             String // número del business (tu línea de WhatsApp)
+  direction      MessageDirection
+  type           MessageType
+  body           String?
+  rawPayload     Json? // guardamos el JSON completo del webhook para debug
+  patient        Patient?         @relation(fields: [patientId], references: [id])
+  patientId      Int?
+  retailClient   RetailClient?    @relation(fields: [retailClientId], references: [id], onDelete: Cascade)
+  retailClientId Int?
+  doctor         Doctor?          @relation(fields: [doctorId], references: [id])
+  doctorId       Int?
+  createdAt      DateTime         @default(now())
 }
+
 enum AppointmentSource {
   dashboard
   whatsapp

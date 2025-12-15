@@ -55,10 +55,11 @@ Proceso mental (no lo menciones):
 
 Objetivos:
 1. Confirmar o coordinar turnos usando EXCLUSIVAMENTE los slots provistos en "available_slots". Elegí el que mejor matchee la preferencia del paciente (día/horario), incluso si está escrito como "5pm" o "17 hs".
-2. Si el paciente acepta un horario ofrecido previamente (pendiente), confirmalo.
-3. Si todavía no eligió, ofrecé hasta 3 slots (ordenados por prioridad) y pedile que confirme uno.
-4. Registrá/actualizá el motivo de la consulta cuando sea posible (ej: "Dolor de cabeza").
-5. Si no hay disponibilidad o falta información, explicalo y pedí aclaraciones concretas.
+2. Si el paciente solo está pidiendo información (precios, dirección, qué llevamos, etc.) y no expresó intención inmediata de agendar/reprogramar, respondé esa consulta y NO ofrezcas horarios salvo que él lo pida después.
+3. Si el paciente acepta un horario ofrecido previamente (pendiente), confirmalo.
+4. Si todavía no eligió, ofrecé hasta 3 slots (ordenados por prioridad) y pedile que confirme uno.
+5. Registrá/actualizá el motivo de la consulta cuando sea posible (ej: "Dolor de cabeza").
+6. Si no hay disponibilidad o falta información, explicalo y pedí aclaraciones concretas.
 6. Antes de ofrecer turnos, revisá si faltan datos básicos. Si "patient_profile.needsDni" es true, pedí el DNI (solo números). Luego seguí con: nombre completo, fecha de nacimiento, dirección, obra social/prepaga y motivo de consulta (respetá ese orden). No avances al siguiente paso hasta completar el anterior.
 7. Cada vez que el paciente aporte alguno de esos datos (aunque sea una sola palabra, ej.: “OSDE”), registralo textual en "action.profileUpdates" usando los campos "dni", "name", "birthDate", "address", "insurance" y/o "consultReason". No inventes ni reformules esos datos.
    "action": { "type": "general", "profileUpdates": { "dni": "12345678" } }
@@ -734,6 +735,9 @@ function buildAgentUserPrompt(ctx: AgentContextBase) {
     ctx.doctorProfile.officeAddress
       ? `Dirección: ${ctx.doctorProfile.officeAddress}`
       : null,
+    ctx.doctorProfile.slotMinutes
+      ? `Duración promedio: ${ctx.doctorProfile.slotMinutes} minutos`
+      : null,
     consultationPrice
       ? `Valor consulta: ${consultationPrice}`
       : null,
@@ -786,6 +790,11 @@ Perfil del consultorio: ${doctorProfileParts.join(" | ") || "Sin datos extra"}
 Motivo registrado: ${ctx.patientProfile.consultReason || "Sin motivo"}
 ${pendingSlot}
 Horario habitual declarado: ${officeHours}
+Duración típica del turno: ${
+  ctx.doctorProfile.slotMinutes
+    ? `${ctx.doctorProfile.slotMinutes} minutos`
+    : "no informada"
+}
 Preferencias detectadas en este mensaje: ${preferenceSummary}
 Foco del día/turno actual: ${focusDaySummary}
 Disponibilidad para el día pedido: ${preferredAvailabilityText}

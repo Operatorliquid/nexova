@@ -79,7 +79,7 @@ const Topbar: React.FC<TopbarProps> = ({
         <button
           type="button"
           onClick={onToggleTheme}
-          className="inline-flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-[#8fa0b3] border border-slate-200 rounded-full px-3 py-1 transition hover:text-[#031816] hover:border-transparent hover:bg-gradient-to-r hover:from-[#39F3D7] hover:to-[#68AFDD] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#39F3D7]/40"
+          className="inline-flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-[#8fa0b3] border border-slate-200 rounded-full px-3 py-1 transition hover:text-white hover:border-transparent hover:bg-[linear-gradient(90deg,_rgba(1,46,221,0.83)_0%,_rgb(54,95,255)_100%)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#39F3D7]/40"
         >
           {themeMode === "dark" ? "🌙 Modo oscuro" : "☀️ Modo claro"}
         </button>
@@ -116,7 +116,7 @@ const Topbar: React.FC<TopbarProps> = ({
         <button
           type="button"
           onClick={onGoToProfile}
-          className="group flex items-center gap-2 text-xs md:text-sm text-white rounded-full px-2 py-1 transition hover:text-[#031816] hover:bg-gradient-to-r hover:from-[#39F3D7] hover:to-[#68AFDD] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#39F3D7]/40"
+          className="group flex items-center gap-2 text-xs md:text-sm text-white rounded-full px-2 py-1 transition hover:text-white hover:bg-[linear-gradient(90deg,_rgba(1,46,221,0.83)_0%,_rgb(54,95,255)_100%)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#39F3D7]/40"
         >
           <div className="w-8 h-8 rounded-full bg-slate-900 text-white flex items-center justify-center text-xs font-semibold overflow-hidden">
             {resolvedAvatar ? (
@@ -130,10 +130,10 @@ const Topbar: React.FC<TopbarProps> = ({
             )}
           </div>
           <div className="hidden md:flex flex-col items-start">
-            <span className="font-medium leading-tight text-white group-hover:text-[#031816] transition">
+            <span className="font-medium leading-tight text-white group-hover:text-white transition">
               {doctor.name}
             </span>
-            <span className="text-[10px] text-[#8fa0b3] leading-tight group-hover:text-[#031816] transition">
+            <span className="text-[10px] text-[#8fa0b3] leading-tight group-hover:text-white transition">
               Mi cuenta
             </span>
           </div>

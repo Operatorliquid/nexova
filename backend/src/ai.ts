@@ -1,6 +1,7 @@
 // backend/src/ai.ts
 import OpenAI from "openai";
 import { runHealthAgent } from "./agents/healthAgent";
+import { runRetailAgent } from "./agents/retailAgent";
 import { AgentExecutionResult, AgentProfileUpdates } from "./agents/types";
 import { formatConsultReasonAnswer } from "./utils/text";
 
@@ -135,7 +136,9 @@ export type WhatsappAgentContext = {
     consultationPrice: number | null;
     emergencyConsultationPrice: number | null;
     additionalNotes: string | null;
+    slotMinutes?: number | null;
   };
+  productCatalog?: string[];
 };
 
 
@@ -150,6 +153,17 @@ export async function runWhatsappAgent(
     return {
       replyToPatient:
         "Te leo, ¿podés escribirme en texto para ayudarte mejor?",
+      action: { type: "NONE" },
+    };
+  }
+
+  // Rama retail: no slots ni agenda
+  if (ctx.businessType === "RETAIL") {
+    const retailResult = await runDomainAgent(ctx);
+    if (retailResult) return retailResult;
+    return {
+      replyToPatient:
+        "Contame qué querés pedir o preguntá por stock/precios y te ayudo.",
       action: { type: "NONE" },
     };
   }
@@ -230,8 +244,20 @@ export async function runWhatsappAgent(
     return llmResult;
   }
 
-  // 3) Fallback heurístico (por si el modelo falla o no hay key)
-  return simpleHeuristicAgent(ctx);
+  // 3) Fallback informativo mínimo si el modelo no responde.
+  const infoReply = buildInformationalFallback(ctx);
+  if (infoReply) {
+    return {
+      replyToPatient: infoReply,
+      action: { type: "NONE" },
+    };
+  }
+
+  return {
+    replyToPatient:
+      "En este momento no puedo revisar la agenda automáticamente. Contame qué necesitás y lo reviso enseguida.",
+    action: { type: "NONE" },
+  };
 }
 
 async function runDomainAgent(
@@ -242,9 +268,19 @@ async function runDomainAgent(
 
   if (ctx.businessType === "HEALTH") {
     execution = await runHealthAgent(ctx, openaiClient);
+  } else if (ctx.businessType === "RETAIL") {
+    execution = await runRetailAgent(ctx, openaiClient);
   }
 
   if (!execution) return null;
+
+  if (ctx.businessType === "RETAIL") {
+    return {
+      replyToPatient: execution.replyToPatient,
+      action: execution.action as any,
+      profileUpdates: execution.profileUpdates ?? null,
+    };
+  }
 
   const action = execution.action;
   const profileUpdates =
@@ -348,6 +384,128 @@ async function runDomainAgent(
   return null;
 }
 
+function buildInformationalFallback(ctx: WhatsappAgentContext): string | null {
+  if (ctx.businessType === "RETAIL") return null;
+  const text = ctx.text?.trim();
+  if (!text) return null;
+  const lower = text.toLowerCase();
+  const profile = ctx.doctorProfile;
+
+  const asksPrice =
+    lower.includes("precio") ||
+    lower.includes("valor") ||
+    lower.includes("cuánto sale") ||
+    lower.includes("cuanto sale") ||
+    lower.includes("cuánto cuesta") ||
+    lower.includes("cuanto cuesta") ||
+    lower.includes("cobrás") ||
+    lower.includes("cobras");
+  if (asksPrice) {
+    const normal = profile.consultationPrice;
+    const emergency = profile.emergencyConsultationPrice;
+    if (normal && emergency) {
+      return `La consulta estándar cuesta $ ${normal.toLocaleString(
+        "es-AR"
+      )} y la de urgencia $ ${emergency.toLocaleString(
+        "es-AR"
+      )}. Si necesitás otro dato, decime.`;
+    }
+    if (normal) {
+      return `La consulta cuesta $ ${normal.toLocaleString(
+        "es-AR"
+      )}. Cualquier otra duda me avisás.`;
+    }
+    return null;
+  }
+
+  const asksSchedule =
+    lower.includes("horario") ||
+    lower.includes("horarios") ||
+    lower.includes("atienden") ||
+    lower.includes("atiende") ||
+    lower.includes("abren") ||
+    lower.includes("cierran") ||
+    lower.includes("días") ||
+    lower.includes("dias");
+  if (asksSchedule && (profile.officeDays || profile.officeHours)) {
+    const parts: string[] = [];
+    if (profile.officeDays) parts.push(`atiende ${profile.officeDays}`);
+    if (profile.officeHours) parts.push(`en el horario ${profile.officeHours}`);
+    return `La doctora ${ctx.doctorName} ${
+      parts.join(" ") || "tiene horario flexible"
+    }.`;
+  }
+
+  const asksAddress =
+    lower.includes("direccion") ||
+    lower.includes("dirección") ||
+    lower.includes("ubicacion") ||
+    lower.includes("ubicación") ||
+    lower.includes("donde queda") ||
+    lower.includes("dónde queda") ||
+    lower.includes("donde atiende") ||
+    lower.includes("dónde atiende");
+  if (asksAddress && (profile.officeAddress || profile.clinicName)) {
+    const location = [profile.clinicName, profile.officeAddress]
+      .filter(Boolean)
+      .join(" - ");
+    return `El consultorio queda en ${location}.`;
+  }
+
+  const asksContact =
+    lower.includes("telefono") ||
+    lower.includes("teléfono") ||
+    lower.includes("celu") ||
+    lower.includes("whatsapp") ||
+    lower.includes("número") ||
+    lower.includes("numero");
+  if (asksContact && profile.contactPhone) {
+    return `Podés comunicarte al ${profile.contactPhone} o seguir por acá para cualquier consulta.`;
+  }
+
+  const asksSpecialty =
+    lower.includes("especialidad") ||
+    lower.includes("especialista") ||
+    lower.includes("qué doctor") ||
+    lower.includes("que doctor");
+  if (asksSpecialty && profile.specialty) {
+    return `La doctora ${ctx.doctorName} es especialista en ${profile.specialty}.`;
+  }
+
+  const asksDuration =
+    lower.includes("cuanto dura") ||
+    lower.includes("cuánto dura") ||
+    lower.includes("duracion") ||
+    lower.includes("duración") ||
+    lower.includes("dura la consulta") ||
+    lower.includes("dura un turno");
+  if (asksDuration) {
+    const minutes = profile.slotMinutes ?? null;
+    if (minutes && minutes > 0) {
+      const formatted =
+        minutes % 60 === 0
+          ? `${minutes / 60} hora${minutes === 60 ? "" : "s"}`
+          : `${minutes} minutos`;
+      return `Cada turno dura aproximadamente ${formatted}.`;
+    }
+    return "Los turnos suelen durar entre 30 y 60 minutos, según la consulta.";
+  }
+
+  const asksNotes =
+    lower.includes("indicacion") ||
+    lower.includes("indicación") ||
+    lower.includes("preparacion") ||
+    lower.includes("preparación") ||
+    lower.includes("nota") ||
+    lower.includes("recomendacion") ||
+    lower.includes("recomendación");
+  if (asksNotes && profile.additionalNotes) {
+    return profile.additionalNotes;
+  }
+
+  return null;
+}
+
 /**
  * Fallback heurístico:
  * - Detecta si el mensaje habla de turno.
@@ -414,6 +572,14 @@ function simpleHeuristicAgent(ctx: WhatsappAgentContext): AgentResult {
     lower.includes("nota") ||
     lower.includes("recomendacion") ||
     lower.includes("recomendación");
+  const asksDuration =
+    lower.includes("cuanto dura") ||
+    lower.includes("cuánto dura") ||
+    lower.includes("duracion") ||
+    lower.includes("duración") ||
+    lower.includes("dura un turno") ||
+    lower.includes("dura la consulta") ||
+    lower.includes("dura la cita");
 
   const acceptanceRegex =
     /(me sirve|lo tomo|lo tomamos|confirmo|perfecto ese|queda ese|agendalo|agéndalo|dale ese|está bien ese|ese me va|de una)/;
@@ -531,6 +697,29 @@ function simpleHeuristicAgent(ctx: WhatsappAgentContext): AgentResult {
   if (asksNotes && profile.additionalNotes) {
     return {
       replyToPatient: `${profile.additionalNotes} ¿Querés que avancemos con un turno?`,
+      action: { type: "NONE" },
+    };
+  }
+
+  if (asksDuration) {
+    const minutes = profile.slotMinutes ?? null;
+    if (minutes && minutes > 0) {
+      const hours = minutes / 60;
+      const formatted =
+        minutes % 60 === 0
+          ? `${hours.toLocaleString("es-AR", {
+              minimumFractionDigits: 0,
+              maximumFractionDigits: 2,
+            })} hora${hours === 1 ? "" : "s"}`
+          : `${minutes} minutos`;
+      return {
+        replyToPatient: `Cada turno dura aproximadamente ${formatted}. Cuando quieras te paso horarios disponibles para agendar.`,
+        action: { type: "NONE" },
+      };
+    }
+    return {
+      replyToPatient:
+        "Los turnos suelen durar entre 30 y 60 minutos según el caso. Avisame si querés coordinar uno en particular.",
       action: { type: "NONE" },
     };
   }

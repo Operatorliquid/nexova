@@ -26,6 +26,12 @@ type SummaryNote = {
   createdAt: Date;
 };
 
+type RetailSummaryClient = {
+  fullName: string;
+  address?: string | null;
+  phone?: string | null;
+};
+
 export async function generatePatientSummary(params: {
   patient: SummaryPatient;
   consultations: SummaryConsultation[];
@@ -121,6 +127,39 @@ export async function generateClinicalHistoryNarrative(params: {
     return text.trim();
   } catch (error) {
     console.error("[generateClinicalHistoryNarrative] Error:", error);
+    return fallback;
+  }
+}
+
+export async function generateRetailClientSummary(params: {
+  client: RetailSummaryClient;
+  orders?: Array<{
+    createdAt: Date;
+    status: string;
+    items: Array<{ name: string; quantity: number }>;
+  }>;
+  notes: SummaryNote[];
+}): Promise<string> {
+  const fallback = buildRetailFallbackSummary(params);
+  if (!openaiClient) return fallback;
+
+  try {
+    const prompt = buildRetailSummaryPrompt(params);
+    const response = await openaiClient.responses.create({
+      model: SUMMARY_MODEL,
+      input: [
+        {
+          role: "system",
+          content:
+            "Sos un asistente comercial que resume en español el historial de un cliente de retail. Resumí tono, preferencias, compromisos y alertas logísticas.",
+        },
+        { role: "user", content: prompt },
+      ],
+    });
+    const text = extractResponseText(response);
+    return text ? text.trim() : fallback;
+  } catch (error) {
+    console.error("[generateRetailClientSummary] Error:", error);
     return fallback;
   }
 }
@@ -242,6 +281,77 @@ function buildFallbackSummary({
   );
 
   return parts.join(" ");
+}
+
+function buildRetailSummaryPrompt({
+  client,
+  orders = [],
+  notes,
+}: {
+  client: RetailSummaryClient;
+  orders?: Array<{ createdAt: Date; status: string; items: Array<{ name: string; quantity: number }> }>;
+  notes: SummaryNote[];
+}) {
+  const ordersText =
+    orders.length > 0
+      ? orders
+          .slice(0, 10)
+          .map((o, idx) => {
+            const items = o.items
+              .map((it) => `${it.quantity}x ${it.name}`)
+              .join(", ");
+            return `${idx + 1}. ${formatDateTimeHuman(o.createdAt)} · ${o.status}: ${items}`;
+          })
+          .join("\n")
+      : "Sin pedidos registrados.";
+
+  const notesText =
+    notes.length > 0
+      ? notes
+          .slice(0, 20)
+          .map(
+            (note, idx) =>
+              `${idx + 1}. ${formatDateTimeHuman(note.createdAt)}: ${note.content}`
+          )
+          .join("\n")
+      : "Sin notas registradas.";
+
+  return `
+Cliente: ${client.fullName || "Nombre no disponible"}
+Dirección: ${client.address || "No informada"}
+Contacto: ${client.phone || "No informado"}
+
+Notas cargadas:
+${notesText}
+
+Pedidos recientes:
+${ordersText}
+
+Armá un resumen breve (3-6 frases) que incluya:
+- Preferencias o patrones de pedido mencionados.
+- Alertas logísticas (horarios, entregas, coordinaciones).
+- Tonalidad del cliente (cálido, apurado, exige confirmaciones, etc.).
+- Próximos pasos o sugerencias para atenderlo mejor.
+No repitas datos de contacto ni inventes información.
+`;
+}
+
+function buildRetailFallbackSummary({
+  client,
+  notes,
+}: {
+  client: RetailSummaryClient;
+  notes: SummaryNote[];
+}) {
+  if (!notes.length) return "Sin notas registradas para este cliente.";
+  const joined = notes
+    .slice(0, 5)
+    .map(
+      (n) =>
+        `- ${formatDateTimeHuman(n.createdAt)}: ${n.content.trim().slice(0, 180)}`
+    )
+    .join("\n");
+  return `Notas recientes del cliente ${client.fullName}:\n${joined}`;
 }
 
 function buildClinicalHistoryPrompt({

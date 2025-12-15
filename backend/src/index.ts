@@ -11,7 +11,15 @@ import { authMiddleware, AuthRequest } from "./auth";
 import { sendWhatsAppText, checkTwilioConnectivity } from "./whatsapp";
 import { runWhatsappAgent, AvailableSlot, checkOpenAIConnectivity } from "./ai";
 import crypto from "crypto";
-import { Prisma, Patient, ConversationState } from "@prisma/client";
+import OpenAI from "openai";
+import {
+  Prisma,
+  Patient,
+  ConversationState,
+  Product,
+  BusinessType,
+  PatientTagSeverity,
+} from "@prisma/client";
 import {
   formatConsultReasonAnswer,
   normalizeInsuranceAnswer,
@@ -19,6 +27,7 @@ import {
 import {
   generatePatientSummary,
   generateClinicalHistoryNarrative,
+  generateRetailClientSummary,
 } from "./services/patientSummary";
 import { handleConversationFlow } from "./conversation/stateMachine";
 import {
@@ -27,14 +36,30 @@ import {
   ConversationStateData,
   MenuTemplate,
 } from "./conversation/types";
+import { handleRetailAgentAction } from "./handlers/retail";
+import { handleHealthWebhookMessage } from "./handlers/health";
+import {
+  ensureRetailClientForPhone,
+  matchProductName,
+  findPendingOrderForClient,
+  upsertRetailOrder,
+} from "./utils/retail";
+import { appendMenuHintForBusiness, appendMenuHint } from "./utils/hints";
+import { runRetailAutomationAgent } from "./agents/automationRetail";
 
 const app = express();
 
 const UPLOADS_DIR = path.join(__dirname, "..", "uploads");
 const DOCTOR_UPLOADS_DIR = path.join(UPLOADS_DIR, "doctors");
+const PRODUCT_UPLOADS_DIR = path.join(UPLOADS_DIR, "products");
+const ORDER_UPLOADS_DIR = path.join(UPLOADS_DIR, "orders");
+const PROMOTION_UPLOADS_DIR = path.join(UPLOADS_DIR, "promotions");
 const fsp = fs.promises;
 ensureDirectory(UPLOADS_DIR);
 ensureDirectory(DOCTOR_UPLOADS_DIR);
+ensureDirectory(PRODUCT_UPLOADS_DIR);
+ensureDirectory(ORDER_UPLOADS_DIR);
+ensureDirectory(PROMOTION_UPLOADS_DIR);
 
 const PORT = process.env.PORT || 4000;
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY || null;
@@ -44,7 +69,15 @@ const CORS_ORIGINS = (process.env.CORS_ORIGINS || "http://localhost:5173")
   .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
+const APP_BASE_URL =
+  process.env.APP_BASE_URL ||
+  process.env.PUBLIC_URL ||
+  process.env.BASE_URL ||
+  `http://localhost:${PORT}`;
 const allowAnyOrigin = CORS_ORIGINS.includes("*");
+const automationOpenAIClient = process.env.OPENAI_API_KEY
+  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+  : null;
 
 // Habilitamos CORS para que el frontend (localhost:5173) pueda hablar con este backend
 app.use(
@@ -118,6 +151,20 @@ const NON_BLOCKING_APPOINTMENT_STATUSES = [
 const PATIENT_TAG_SEVERITIES = ["critical", "high", "medium", "info"] as const;
 type PatientTagSeverityValue = (typeof PATIENT_TAG_SEVERITIES)[number];
 
+const PRODUCT_CATEGORY_OPTIONS = [
+  { key: "beverages", label: "Bebidas" },
+  { key: "food", label: "Comidas" },
+  { key: "coca_line", label: "Línea Coca" },
+  { key: "manaos_line", label: "Línea Manaos" },
+  { key: "snacks", label: "Galletitas & Snacks" },
+  { key: "bakery", label: "Panificados" },
+  { key: "cleaning", label: "Limpieza" },
+  { key: "personal_care", label: "Cuidado personal" },
+] as const;
+const PRODUCT_CATEGORY_SET = new Set(
+  PRODUCT_CATEGORY_OPTIONS.map((option) => option.key)
+);
+
 const isPatientTagSeverity = (value: string): value is PatientTagSeverityValue =>
   PATIENT_TAG_SEVERITIES.includes(value as PatientTagSeverityValue);
 
@@ -150,12 +197,140 @@ function serializePatientTag(tag: {
   };
 }
 
-const MAX_PROFILE_IMAGE_BYTES = 2 * 1024 * 1024; // 2MB
-const ALLOWED_PROFILE_IMAGE_MIME = new Set([
+function serializeProductTagRecord(tag: {
+  id: number;
+  label: string;
+  severity: string;
+  createdAt: Date;
+}) {
+  return {
+    id: tag.id,
+    label: tag.label,
+    severity: tag.severity as PatientTagSeverityValue,
+    createdAt: tag.createdAt.toISOString(),
+  };
+}
+
+function serializeProduct(product: Product & {
+  tags?: {
+    id: number;
+    label: string;
+    severity: string;
+    createdAt: Date;
+  }[];
+}) {
+  return {
+    id: product.id,
+    name: product.name,
+    description: product.description,
+    imageUrl: product.imageUrl,
+    price: product.price,
+    quantity: product.quantity,
+    doctorId: product.doctorId,
+    categories: Array.isArray((product as any).categories)
+      ? (product as any).categories
+      : [],
+    createdAt: product.createdAt.toISOString(),
+    updatedAt: product.updatedAt.toISOString(),
+    tags: (product.tags || []).map(serializeProductTagRecord),
+  };
+}
+
+function serializeOrderRecord(order: any) {
+  return {
+    id: order.id,
+    sequenceNumber: order.sequenceNumber,
+    status: order.status,
+    paymentStatus: order.paymentStatus,
+    paidAmount: order.paidAmount,
+    totalAmount: order.totalAmount,
+    customerName: order.customerName,
+    customerAddress: order.customerAddress,
+    customerDni: order.customerDni,
+    createdAt: order.createdAt,
+    items: (order.items || []).map((item: any) => ({
+      id: item.id,
+      productId: item.productId,
+      productName: item.product?.name ?? item.productName ?? "Producto",
+      quantity: item.quantity,
+      unitPrice: item.unitPrice,
+    })),
+    attachments: (order.attachments || []).map((att: any) => ({
+      id: att.id,
+      url: att.url,
+      filename: att.filename || null,
+      mimeType: att.mimeType,
+      createdAt: att.createdAt,
+    })),
+  };
+}
+
+function sanitizeProductName(value?: string | null) {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.slice(0, 120);
+}
+
+function sanitizeOptionalText(value?: string | null, maxLength = 1000) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.slice(0, maxLength);
+}
+
+function parseNonNegativeInteger(value: unknown): number | null {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return null;
+    return Math.max(0, Math.round(value));
+  }
+  if (typeof value === "string") {
+    const cleaned = value.replace(/[^\d.,-]/g, "").replace(",", ".");
+    if (!cleaned) return null;
+    const parsed = Number(cleaned);
+    if (!Number.isFinite(parsed)) return null;
+    return Math.max(0, Math.round(parsed));
+  }
+  return null;
+}
+
+function sanitizeProductCategories(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of input) {
+    if (typeof entry !== "string") continue;
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const lower = trimmed.toLowerCase();
+    const allowedKey = PRODUCT_CATEGORY_SET.has(lower) ? lower : null;
+    const value =
+      allowedKey ??
+      trimmed
+        .slice(0, 40)
+        .replace(/\s+/g, " ")
+        .trim();
+    if (!value) continue;
+    const dedupeKey = value.toLowerCase();
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    result.push(value);
+    if (result.length >= 12) break;
+  }
+  return result;
+}
+
+const MAX_IMAGE_UPLOAD_BYTES = 2 * 1024 * 1024; // 2MB
+const ALLOWED_IMAGE_MIME_TYPES = new Set([
   "image/png",
   "image/jpeg",
   "image/jpg",
   "image/webp",
+]);
+const MAX_ATTACHMENT_UPLOAD_BYTES = 5 * 1024 * 1024; // 5MB
+const ALLOWED_ATTACHMENT_MIME_TYPES = new Set([
+  ...ALLOWED_IMAGE_MIME_TYPES,
+  "application/pdf",
 ]);
 
 type DoctorAvailabilityStatusValue =
@@ -531,6 +706,34 @@ function parseOfficeHoursWindows(raw?: string | null): OfficeHourWindow[] {
     });
   }
 
+  if (windows.length === 0) {
+    const fallbackTimes: number[] = [];
+    const fallbackRegex = /(\d{1,2})(?::(\d{2}))?/g;
+    let fallbackMatch: RegExpExecArray | null;
+
+    while (
+      (fallbackMatch = fallbackRegex.exec(normalized)) &&
+      fallbackTimes.length < 8
+    ) {
+      const minutes = parseTimeToMinutes(
+        fallbackMatch[1],
+        fallbackMatch[2],
+        null
+      );
+      if (minutes !== null) {
+        fallbackTimes.push(minutes);
+      }
+    }
+
+    for (let i = 0; i + 1 < fallbackTimes.length; i += 2) {
+      const startMinute = fallbackTimes[i];
+      const endMinute = fallbackTimes[i + 1];
+      if (endMinute > startMinute) {
+        windows.push({ startMinute, endMinute });
+      }
+    }
+  }
+
   return windows.sort((a, b) => a.startMinute - b.startMinute);
 }
 
@@ -586,14 +789,14 @@ function parseOfficeDays(raw?: string | null): OfficeDaySet | null {
     .map((token) => token.trim())
     .filter(Boolean)
     .forEach((token) => {
-      let base = token.replace(/[^a-z]/g, "");
-      if (!base || base === "y" || base === "al" || base === "a") {
+      const sanitized = token.replace(/[^a-z]/g, "");
+      if (!sanitized || sanitized === "y" || sanitized === "al" || sanitized === "a") {
         return;
       }
-      if (base.endsWith("s") && base.length > 3) {
-        base = base.slice(0, -1);
+      let idx = dayMap[sanitized];
+      if (idx === undefined && sanitized.endsWith("s") && sanitized.length > 3) {
+        idx = dayMap[sanitized.slice(0, -1)];
       }
-      const idx = dayMap[base];
       if (idx !== undefined) {
         set.add(idx);
       }
@@ -710,7 +913,7 @@ function ensureDirectory(dir: string) {
   }
 }
 
-async function removeProfileImageFile(relativeUrl?: string | null) {
+async function removeUploadedFile(relativeUrl?: string | null) {
   if (!relativeUrl || !relativeUrl.startsWith("/uploads/")) {
     return;
   }
@@ -733,29 +936,62 @@ function detectExtensionFromMime(mime: string) {
   if (mime.includes("png")) return "png";
   if (mime.includes("webp")) return "webp";
   if (mime.includes("gif")) return "gif";
+  if (mime.includes("pdf")) return "pdf";
   return "jpg";
+}
+
+function buildImageValidationError(message: string) {
+  const error = new Error(message);
+  (error as any).code = "IMAGE_VALIDATION_ERROR";
+  return error;
 }
 
 function parseBase64ImageInput(imageBase64: string) {
   const trimmed = (imageBase64 || "").trim();
   if (!trimmed) {
-    throw new Error("No recibí la imagen a guardar.");
+    throw buildImageValidationError("No recibí la imagen a guardar.");
   }
   const dataUriMatch = trimmed.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
   const mime = dataUriMatch ? dataUriMatch[1] : "image/png";
   const base64Payload = dataUriMatch ? dataUriMatch[2] : trimmed;
-  if (!ALLOWED_PROFILE_IMAGE_MIME.has(mime)) {
-    throw new Error("Formato de imagen no soportado. Subí PNG, JPG o WEBP.");
+  if (!ALLOWED_IMAGE_MIME_TYPES.has(mime)) {
+    throw buildImageValidationError(
+      "Formato de imagen no soportado. Subí PNG, JPG o WEBP."
+    );
   }
   const buffer = Buffer.from(base64Payload, "base64");
   if (!buffer.length) {
-    throw new Error("La imagen no tiene datos válidos.");
+    throw buildImageValidationError("La imagen no tiene datos válidos.");
   }
-  if (buffer.length > MAX_PROFILE_IMAGE_BYTES) {
-    throw new Error("La imagen es demasiado pesada. Usá un archivo de hasta 2 MB.");
+  if (buffer.length > MAX_IMAGE_UPLOAD_BYTES) {
+    throw buildImageValidationError(
+      "La imagen es demasiado pesada. Usá un archivo de hasta 2 MB."
+    );
   }
   const extension = detectExtensionFromMime(mime);
   return { buffer, extension };
+}
+
+function parseBase64AttachmentInput(fileBase64: string) {
+  const trimmed = (fileBase64 || "").trim();
+  if (!trimmed) {
+    throw buildImageValidationError("No recibí el archivo a guardar.");
+  }
+  const dataUriMatch = trimmed.match(/^data:([a-zA-Z0-9.+/-]+);base64,(.+)$/);
+  const mime = dataUriMatch ? dataUriMatch[1] : "application/octet-stream";
+  const base64Payload = dataUriMatch ? dataUriMatch[2] : trimmed;
+  if (!ALLOWED_ATTACHMENT_MIME_TYPES.has(mime)) {
+    throw buildImageValidationError("Formato no soportado. Subí imagen o PDF.");
+  }
+  const buffer = Buffer.from(base64Payload, "base64");
+  if (!buffer.length) {
+    throw buildImageValidationError("El archivo no tiene datos válidos.");
+  }
+  if (buffer.length > MAX_ATTACHMENT_UPLOAD_BYTES) {
+    throw buildImageValidationError("El archivo es demasiado pesado (máx 5 MB).");
+  }
+  const extension = detectExtensionFromMime(mime);
+  return { buffer, extension, mime };
 }
 
 async function saveProfileImageForDoctor(doctorId: number, imageBase64: string, previousUrl?: string | null) {
@@ -765,21 +1001,71 @@ async function saveProfileImageForDoctor(doctorId: number, imageBase64: string, 
   await fsp.writeFile(destination, buffer);
   const relativeUrl = `/uploads/doctors/${filename}`;
   if (previousUrl) {
-    await removeProfileImageFile(previousUrl);
+    await removeUploadedFile(previousUrl);
   }
   return relativeUrl;
 }
 
-function appendMenuHint(message: string) {
-  const hint = 'Escribí "menu" para ver las opciones (sacar, reprogramar o cancelar turno).';
-  if (!message || !message.trim()) {
-    return hint;
-  }
-  const normalized = message.toLowerCase();
-  if (normalized.includes("menu") || normalized.includes("menú")) {
-    return message;
-  }
-  return `${message.trim()}\n\n${hint}`;
+async function saveProductImage(productId: number, imageBase64: string) {
+  const { buffer, extension } = parseBase64ImageInput(imageBase64);
+  const filename = `product-${productId}-${Date.now()}.${extension}`;
+  const destination = path.join(PRODUCT_UPLOADS_DIR, filename);
+  await fsp.writeFile(destination, buffer);
+  return `/uploads/products/${filename}`;
+}
+
+async function saveOrderAttachmentFile(
+  orderId: number,
+  fileBase64: string,
+  originalName?: string | null
+) {
+  const { buffer, extension, mime } = parseBase64AttachmentInput(fileBase64);
+  const filename = `order-${orderId}-${Date.now()}.${extension}`;
+  const destination = path.join(ORDER_UPLOADS_DIR, filename);
+  await fsp.writeFile(destination, buffer);
+  const cleanedName =
+    sanitizeOptionalText(originalName, 120) || `Comprobante ${orderId}`;
+  return {
+    url: `/uploads/orders/${filename}`,
+    filename: cleanedName,
+    mime,
+  };
+}
+
+async function savePromotionImage(doctorId: number, imageBase64: string) {
+  const { buffer, extension } = parseBase64ImageInput(imageBase64);
+  const filename = `promo-${doctorId}-${Date.now()}.${extension}`;
+  const destination = path.join(PROMOTION_UPLOADS_DIR, filename);
+  await fsp.writeFile(destination, buffer);
+  return `/uploads/promotions/${filename}`;
+}
+
+function buildPublicUrl(value: string | null | undefined) {
+  if (!value) return null;
+  if (/^https?:\/\//i.test(value)) return value;
+  const base = APP_BASE_URL?.replace(/\/+$/, "") || "";
+  if (value.startsWith("/")) return `${base}${value}`;
+  return `${base}/${value}`;
+}
+
+function buildPublicUrlFromRequest(
+  value: string | null | undefined,
+  req: Request
+) {
+  if (!value) return null;
+  if (/^https?:\/\//i.test(value)) return value;
+  const envOrigin = APP_BASE_URL?.replace(/\/+$/, "") || "";
+  const host = req.get("host");
+  const reqOrigin = host ? `${req.protocol}://${host}` : "";
+  const origin = envOrigin || reqOrigin;
+  const path = value.startsWith("/") ? value : `/${value}`;
+  return origin ? `${origin}${path}` : null;
+}
+
+function isLikelyPublicUrl(url: string | null | undefined) {
+  if (!url) return false;
+  if (!/^https?:\/\//i.test(url)) return false;
+  return !/localhost|127\.0\.0\.1|\.local/i.test(url);
 }
 
 type BookingRequestParams = {
@@ -1203,6 +1489,30 @@ function normalizeWhatsappSender(value: string) {
   return `whatsapp:${cleaned}`;
 }
 
+function extractWhatsappError(error: any) {
+  if (!error) return null;
+  const data = error?.response?.data;
+  const messageCandidates = [
+    data?.message,
+    typeof data?.error === "string" ? data.error : null,
+    data?.error?.message,
+    data?.error_message,
+    data?.detail,
+    data?.more_info,
+    error?.message,
+  ];
+  const message =
+    messageCandidates.find(
+      (value) => typeof value === "string" && value.trim().length > 0
+    ) || null;
+
+  return {
+    message,
+    code: data?.code ?? data?.error_code ?? null,
+    status: error?.response?.status ?? null,
+  };
+}
+
 function validateTwilioSignature(req: Request) {
   const twilioToken = process.env.TWILIO_AUTH_TOKEN;
   if (!twilioToken) return true;
@@ -1424,6 +1734,7 @@ app.post("/api/auth/register", async (req: Request, res: Response) => {
         businessType: doctor.businessType,
         availabilityStatus: doctor.availabilityStatus,
         profileImageUrl: doctor.profileImageUrl ?? null,
+        ticketLogoUrl: (doctor as any).ticketLogoUrl ?? null,
       },
     });
   } catch (error) {
@@ -1480,6 +1791,7 @@ app.post("/api/auth/login", async (req: Request, res: Response) => {
         businessType: doctor.businessType,
         availabilityStatus: doctor.availabilityStatus,
         profileImageUrl: doctor.profileImageUrl ?? null,
+        ticketLogoUrl: (doctor as any).ticketLogoUrl ?? null,
       },
     });
   } catch (error) {
@@ -1852,6 +2164,13 @@ app.get(
   async (req: AuthRequest, res: Response) => {
     try {
       const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+      if (!doctor) {
+        return res.status(404).json({ error: "Doctor no encontrado" });
+      }
       const now = new Date();
       const startOfToday = new Date(
         now.getFullYear(),
@@ -1889,6 +2208,101 @@ app.get(
         0,
         0
       );
+
+      if (doctor.businessType === "RETAIL") {
+        const [
+          pedidosHoyCount,
+          pedidosConfirmadosCount,
+          ingresosHoyAgg,
+          clientesHoyGroup,
+          pendingOrdersToday,
+        ] = await Promise.all([
+          prisma.order.count({
+            where: {
+              doctorId,
+              createdAt: {
+                gte: startOfToday,
+                lte: endOfToday,
+              },
+            },
+          }),
+          prisma.order.count({
+            where: {
+              doctorId,
+              status: "confirmed",
+              createdAt: {
+                gte: startOfToday,
+                lte: endOfToday,
+              },
+            },
+          }),
+          prisma.order.aggregate({
+            _sum: { paidAmount: true },
+            where: {
+              doctorId,
+              paymentStatus: "paid",
+              createdAt: {
+                gte: startOfToday,
+                lte: endOfToday,
+              },
+            },
+          }),
+          prisma.order.groupBy({
+            by: ["clientId"],
+            where: {
+              doctorId,
+              createdAt: {
+                gte: startOfToday,
+                lte: endOfToday,
+              },
+            },
+            _count: { _all: true },
+          }),
+          prisma.order.findMany({
+            where: {
+              doctorId,
+              status: "pending",
+              createdAt: {
+                gte: startOfToday,
+                lte: endOfToday,
+              },
+            },
+            include: { client: true },
+            orderBy: { createdAt: "asc" },
+          }),
+        ]);
+
+        const ingresosHoy = ingresosHoyAgg._sum.paidAmount ?? 0;
+        const clientesHoy = clientesHoyGroup.filter((g) => g.clientId != null).length;
+
+        return res.json({
+          stats: {
+            consultasHoy: 0,
+            pacientesEnEspera: 0,
+            ingresosMes: 0,
+            pacientesRecurrentesPorcentaje: 0,
+          },
+          agendaHoy: [],
+          pagos: {
+            cobradoHoy: 0,
+            pendiente: 0,
+          },
+          retailStats: {
+            pedidosHoy: pedidosHoyCount,
+            pedidosConfirmadosHoy: pedidosConfirmadosCount,
+            ingresosHoy,
+            clientesHoy,
+          },
+          pendingOrdersToday: pendingOrdersToday.map((o) => ({
+            id: o.id,
+            sequenceNumber: o.sequenceNumber,
+            clientName: o.customerName || o.client?.fullName || "Cliente",
+            status: o.status,
+            createdAt: o.createdAt.toISOString(),
+            totalAmount: o.totalAmount,
+          })),
+        });
+      }
 
       const [
         consultasHoy,
@@ -2033,6 +2447,162 @@ app.get(
   }
 );
 
+/**
+ * Métricas para comercios (pedidos)
+ * GET /api/commerce/metrics?start=ISO&end=ISO
+ */
+app.get(
+  "/api/commerce/metrics",
+  authMiddleware,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+      if (!doctor || doctor.businessType !== "RETAIL") {
+        return res.status(400).json({ error: "Métricas disponibles solo para comercios" });
+      }
+
+      const start = req.query.start ? new Date(String(req.query.start)) : new Date();
+      const end = req.query.end ? new Date(String(req.query.end)) : new Date();
+      if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+        return res.status(400).json({ error: "Rango de fechas inválido" });
+      }
+
+      const orders = await prisma.order.findMany({
+        where: {
+          doctorId,
+          createdAt: {
+            gte: start,
+            lte: end,
+          },
+        },
+        include: {
+          items: {
+            include: { product: true },
+          },
+          client: true,
+        },
+      });
+
+      const totals = {
+        total: orders.length,
+        pending: 0,
+        confirmed: 0,
+        cancelled: 0,
+      };
+
+      let paidRevenue = 0;
+      let totalRevenue = 0;
+      let outstanding = 0;
+      let partialOutstanding = 0;
+
+      const clientsSet = new Set<number>();
+      const fallbackClients = new Set<string>();
+
+      const productAgg = new Map<
+        number,
+        { name: string; quantity: number; revenue: number }
+      >();
+
+      const daily = new Map<
+        string,
+        { orders: number; paid: number; total: number }
+      >();
+
+      orders.forEach((order) => {
+        const paid = order.paidAmount ?? 0;
+        totalRevenue += order.totalAmount ?? 0;
+        paidRevenue += paid;
+        const remaining = Math.max((order.totalAmount ?? 0) - paid, 0);
+
+        if (order.paymentStatus === "partial") {
+          partialOutstanding += remaining;
+        } else if (order.paymentStatus !== "paid") {
+          outstanding += remaining || order.totalAmount || 0;
+        }
+
+        if (order.status === "pending") totals.pending += 1;
+        else if (order.status === "confirmed") totals.confirmed += 1;
+        else if (order.status === "cancelled") totals.cancelled += 1;
+
+        if (order.clientId) clientsSet.add(order.clientId);
+        else if (order.customerName) fallbackClients.add(order.customerName.trim());
+
+        const dayKey = order.createdAt.toISOString().slice(0, 10);
+        const entry = daily.get(dayKey) || { orders: 0, paid: 0, total: 0 };
+        entry.orders += 1;
+        entry.paid += paid;
+        entry.total += order.totalAmount ?? 0;
+        daily.set(dayKey, entry);
+
+        order.items.forEach((item) => {
+          const name = item.product?.name || "Producto";
+          const current = productAgg.get(item.productId) || {
+            name,
+            quantity: 0,
+            revenue: 0,
+          };
+          current.quantity += item.quantity;
+          current.revenue += item.quantity * item.unitPrice;
+          productAgg.set(item.productId, current);
+        });
+      });
+
+      const uniqueClients = clientsSet.size || fallbackClients.size;
+
+      const products = Array.from(productAgg.values());
+      const bestProduct =
+        products.length > 0
+          ? products.slice().sort((a, b) => b.quantity - a.quantity)[0]
+          : null;
+      const worstProduct =
+        products.length > 0
+          ? products
+              .filter((p) => p.quantity > 0)
+              .slice()
+              .sort((a, b) => a.quantity - b.quantity)[0] || null
+          : null;
+
+      const dailySeries = Array.from(daily.entries())
+        .map(([date, info]) => ({
+          date,
+          orders: info.orders,
+          paid: info.paid,
+          total: info.total,
+        }))
+        .sort((a, b) => a.date.localeCompare(b.date));
+
+      const avgTicketPaid =
+        totals.confirmed > 0 ? Math.round(paidRevenue / totals.confirmed) : 0;
+
+      res.json({
+        totals,
+        revenue: {
+          paid: paidRevenue,
+          total: totalRevenue,
+          outstanding,
+          partialOutstanding,
+          avgTicketPaid,
+        },
+        clients: {
+          unique: uniqueClients,
+        },
+        products: {
+          best: bestProduct,
+          worst: worstProduct,
+        },
+        daily: dailySeries,
+      });
+    } catch (error) {
+      console.error("[Retail metrics]", error);
+      res.status(500).json({ error: "Error al obtener métricas" });
+    }
+  }
+);
+
 function buildWhatsappStatusPayload(doctor: {
   whatsappStatus: string;
   whatsappBusinessNumber: string | null;
@@ -2074,9 +2644,25 @@ app.get(
 app.get(
   "/api/whatsapp/numbers",
   authMiddleware,
-  async (_req: AuthRequest, res: Response) => {
+  async (req: AuthRequest, res: Response) => {
     try {
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: req.doctorId! },
+        select: { businessType: true },
+      });
+
+      if (!doctor) {
+        return res.status(404).json({ error: "Doctor no encontrado" });
+      }
+
+      const targetBusinessType: BusinessType =
+        doctor.businessType === "RETAIL" ? "RETAIL" : "HEALTH";
+
       const numbers = await prisma.whatsAppNumber.findMany({
+        where: {
+          status: "available",
+          businessType: targetBusinessType,
+        },
         orderBy: { createdAt: "asc" },
         select: {
           id: true,
@@ -2104,6 +2690,12 @@ app.post(
       const { whatsappNumberId } = req.body as { whatsappNumberId?: string };
       const doctor = await prisma.doctor.findUnique({
         where: { id: doctorId },
+        select: {
+          businessType: true,
+          whatsappStatus: true,
+          whatsappBusinessNumber: true,
+          whatsappConnectedAt: true,
+        },
       });
 
       if (!doctor) {
@@ -2117,20 +2709,26 @@ app.post(
         return res.json(buildWhatsappStatusPayload(doctor));
       }
 
+      const targetBusinessType: BusinessType =
+        doctor.businessType === "RETAIL" ? "RETAIL" : "HEALTH";
       let availableNumber = null;
       if (whatsappNumberId) {
         availableNumber = await prisma.whatsAppNumber.findUnique({
           where: { id: whatsappNumberId },
         });
 
-        if (!availableNumber || availableNumber.status !== "available") {
+        if (
+          !availableNumber ||
+          availableNumber.status !== "available" ||
+          availableNumber.businessType !== targetBusinessType
+        ) {
           return res.status(400).json({
             error: "Ese número ya no está disponible. Elegí otro.",
           });
         }
       } else {
         availableNumber = await prisma.whatsAppNumber.findFirst({
-          where: { status: "available" },
+          where: { status: "available", businessType: targetBusinessType },
           orderBy: { createdAt: "asc" },
         });
 
@@ -2311,19 +2909,25 @@ app.post(
   async (req: AuthRequest, res: Response) => {
     try {
       const doctorId = req.doctorId!;
-      const { patientName, patientPhone, dateTime, type, price } =
-        req.body as {
-          patientName?: string;
-          patientPhone?: string;
-          dateTime?: string;
-          type?: string;
-          price?: number;
-        };
+      const {
+        patientId,
+        patientName,
+        patientPhone,
+        dateTime,
+        type,
+        price,
+      } = req.body as {
+        patientId?: number | string;
+        patientName?: string;
+        patientPhone?: string;
+        dateTime?: string;
+        type?: string;
+        price?: number | null;
+      };
 
-      if (!patientName || !dateTime || !type || typeof price !== "number") {
+      if (!dateTime || !type) {
         return res.status(400).json({
-          error:
-            "Faltan campos: patientName, dateTime, type o price (number)",
+          error: "Faltan campos: dateTime o type",
         });
       }
 
@@ -2335,34 +2939,142 @@ app.post(
         });
       }
 
-      const patient = await prisma.patient.create({
-        data: {
-          fullName: patientName,
-          phone: patientPhone,
-          doctorId,
-          needsDni: true,
-          needsBirthDate: true,
-          needsAddress: true,
-          needsInsurance: true,
-          needsConsultReason: true,
-        },
-      });
+      let patientRecord = null;
+      if (patientId) {
+        const numericId = Number(patientId);
+        if (Number.isNaN(numericId)) {
+          return res.status(400).json({
+            error: "patientId inválido",
+          });
+        }
+        patientRecord = await prisma.patient.findFirst({
+          where: { id: numericId, doctorId },
+        });
+        if (!patientRecord) {
+          return res
+            .status(404)
+            .json({ error: "Paciente no encontrado para este doctor" });
+        }
+      } else {
+        if (!patientName) {
+          return res.status(400).json({
+            error: "Falta patientName para crear un nuevo paciente",
+          });
+        }
+        patientRecord = await prisma.patient.create({
+          data: {
+            fullName: patientName,
+            phone: patientPhone,
+            doctorId,
+            needsDni: true,
+            needsBirthDate: true,
+            needsAddress: true,
+            needsInsurance: true,
+            needsConsultReason: true,
+          },
+        });
+      }
+
+      let finalPrice: number | null = null;
+      if (typeof price === "number" && !Number.isNaN(price)) {
+        finalPrice = price;
+      } else {
+        const doctor = await prisma.doctor.findUnique({
+          where: { id: doctorId },
+          select: { consultFee: true },
+        });
+        if (doctor?.consultFee) {
+          const cleaned = doctor.consultFee
+            .replace(/[^\d.,]/g, "")
+            .replace(",", ".");
+          const parsed = Number(cleaned);
+          finalPrice = Number.isFinite(parsed) ? parsed : null;
+        }
+      }
 
       const appointment = await prisma.appointment.create({
         data: {
           dateTime: parsedDate,
           type,
           status: "scheduled",
-          price,
+          price: finalPrice ?? 0,
           paid: false,
           source: "dashboard",
           doctorId,
-          patientId: patient.id,
+          patientId: patientRecord.id,
         },
         include: {
           patient: true,
         },
       });
+
+      let whatsappNotification: {
+        sent: boolean;
+        error?: string;
+      } | null = null;
+
+      if (appointment.patient.phone) {
+        try {
+          const doctorWhatsapp = await requireDoctorWhatsapp(doctorId);
+          const patientFirstName =
+            appointment.patient.fullName?.split(" ")[0] || "Hola";
+          const dateLabel = appointment.dateTime.toLocaleDateString("es-AR", {
+            weekday: "long",
+            day: "2-digit",
+            month: "2-digit",
+          });
+          const timeLabel = appointment.dateTime.toLocaleTimeString("es-AR", {
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+
+          const confirmationMessage = `${patientFirstName}, tu turno fue reservado para el ${dateLabel} a las ${timeLabel}. Motivo: ${appointment.type}. Si necesitás reprogramar o cancelar, respondé este mensaje.`;
+
+          const waResult = await sendWhatsAppText(
+            appointment.patient.phone,
+            confirmationMessage,
+            {
+              from: doctorWhatsapp.whatsappBusinessNumber,
+            }
+          );
+
+          const waId =
+            (waResult as any)?.messages?.[0]?.id ??
+            (waResult as any)?.messages?.[0]?.message_id ??
+            null;
+
+          const businessFrom = getDoctorBusinessNumber(doctorWhatsapp);
+
+          await prisma.message.create({
+            data: {
+              waMessageId: waId,
+              from: businessFrom,
+              to: appointment.patient.phone,
+              direction: "outgoing",
+              type: "text",
+              body: confirmationMessage,
+              rawPayload: waResult,
+              patientId: appointment.patient.id,
+              doctorId,
+            },
+          });
+
+          whatsappNotification = { sent: true };
+        } catch (error: any) {
+          const waError = extractWhatsappError(error);
+          console.error(
+            "Error enviando confirmación de turno manual:",
+            error?.response?.data || error
+          );
+          whatsappNotification = {
+            sent: false,
+            error:
+              waError?.message ||
+              error?.message ||
+              "No pudimos notificar por WhatsApp.",
+          };
+        }
+      }
 
       res.status(201).json({
         id: appointment.id,
@@ -2377,6 +3089,7 @@ app.post(
           fullName: appointment.patient.fullName,
           phone: appointment.patient.phone ?? null,
         },
+        whatsappNotification,
       });
     } catch (error) {
       console.error("Error en POST /api/appointments:", error);
@@ -2476,9 +3189,12 @@ app.post(
         "Error en /api/appointments/:id/send-reminder:",
         error?.response?.data || error
       );
+      const waError = extractWhatsappError(error);
       return res.status(500).json({
         error: "No se pudo enviar el recordatorio de turno",
-        detail: error?.message || String(error),
+        detail: waError?.message || error?.message || String(error),
+        twilioCode: waError?.code ?? null,
+        twilioStatus: waError?.status ?? null,
       });
     }
   }
@@ -2504,6 +3220,68 @@ app.post(
         });
       }
 
+      let doctorWhatsapp;
+      try {
+        doctorWhatsapp = await requireDoctorWhatsapp(doctorId);
+      } catch (error: any) {
+        return res.status(400).json({
+          error: error?.message ||
+            "Este doctor aún no tiene un número de WhatsApp conectado",
+        });
+      }
+
+      // Retail: interpretamos patientId como retailClientId
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+      if (!doctor) {
+        return res.status(404).json({ error: "Doctor no encontrado" });
+      }
+
+      if (doctor.businessType === "RETAIL") {
+        const client = await prisma.retailClient.findFirst({
+          where: { id: Number(patientId), doctorId },
+        });
+
+        if (!client || !client.phone) {
+          return res.status(404).json({
+            error: "Cliente no encontrado o sin teléfono",
+          });
+        }
+
+        const waResult = await sendWhatsAppText(client.phone, message, {
+          from: doctorWhatsapp.whatsappBusinessNumber,
+        });
+
+        const waId =
+          (waResult as any)?.messages?.[0]?.id ??
+          (waResult as any)?.messages?.[0]?.message_id ??
+          null;
+
+        const businessFrom = getDoctorBusinessNumber(doctorWhatsapp);
+
+        const saved = await prisma.message.create({
+          data: {
+            waMessageId: waId,
+            from: businessFrom,
+            to: client.phone,
+            direction: "outgoing",
+            type: "text",
+            body: message,
+            rawPayload: waResult,
+            retailClientId: client.id,
+            doctorId,
+          },
+        });
+
+        return res.json({
+          ok: true,
+          waResult,
+          savedMessageId: saved.id,
+        });
+      }
+
       const patient = await prisma.patient.findFirst({
         where: { id: Number(patientId), doctorId },
       });
@@ -2517,16 +3295,6 @@ app.post(
       if (!patient.phone) {
         return res.status(400).json({
           error: "El paciente no tiene teléfono de WhatsApp guardado",
-        });
-      }
-
-      let doctorWhatsapp;
-      try {
-        doctorWhatsapp = await requireDoctorWhatsapp(doctorId);
-      } catch (error: any) {
-        return res.status(400).json({
-          error: error?.message ||
-            "Este doctor aún no tiene un número de WhatsApp conectado",
         });
       }
 
@@ -2565,9 +3333,12 @@ app.post(
         "Error en /api/whatsapp/send-to-patient:",
         error?.response?.data || error
       );
+      const waError = extractWhatsappError(error);
       return res.status(500).json({
         error: "No se pudo enviar el mensaje al paciente",
-        detail: error?.message || String(error),
+        detail: waError?.message || error?.message || String(error),
+        twilioCode: waError?.code ?? null,
+        twilioStatus: waError?.status ?? null,
       });
     }
   }
@@ -2582,6 +3353,13 @@ app.post(
   async (req: AuthRequest, res: Response) => {
     try {
       const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+      if (!doctor) {
+        return res.status(404).json({ error: "Doctor no encontrado." });
+      }
       const { message, tagLabels } = req.body as {
         message?: string;
         tagLabels?: string[];
@@ -2602,32 +3380,51 @@ app.post(
             .filter((tag) => tag.length > 0)
         : [];
 
-      const patientWhere: Prisma.PatientWhereInput = {
-        doctorId,
-        phone: { not: null },
-      };
+      const isRetail = doctor.businessType === "RETAIL";
 
-      if (normalizedSegments.length > 0) {
-        patientWhere.tags = {
-          some: {
-            label: {
-              in: normalizedSegments,
+      const recipients = isRetail
+        ? await prisma.retailClient.findMany({
+            where: {
+              doctorId,
+              phone: { not: null },
+              ...(normalizedSegments.length > 0
+                ? {
+                    tags: {
+                      some: {
+                        label: {
+                          in: normalizedSegments,
+                        },
+                      },
+                    },
+                  }
+                : {}),
             },
-          },
-        };
-      }
+            select: { id: true, phone: true },
+          })
+        : await prisma.patient.findMany({
+            where: {
+              doctorId,
+              phone: { not: null },
+              ...(normalizedSegments.length > 0
+                ? {
+                    tags: {
+                      some: {
+                        label: {
+                          in: normalizedSegments,
+                        },
+                      },
+                    },
+                  }
+                : {}),
+            },
+            select: { id: true, phone: true },
+          });
 
-      const patients = await prisma.patient.findMany({
-        where: patientWhere,
-        select: {
-          id: true,
-          phone: true,
-        },
-      });
-
-      if (!patients.length) {
+      if (!recipients.length) {
         return res.status(400).json({
-          error: "No hay pacientes con WhatsApp registrado para este doctor.",
+          error: isRetail
+            ? "No hay clientes con WhatsApp registrado para este negocio."
+            : "No hay pacientes con WhatsApp registrado para este doctor.",
         });
       }
 
@@ -2644,12 +3441,12 @@ app.post(
 
       const businessFrom = getDoctorBusinessNumber(doctorWhatsapp);
       let sent = 0;
-      const failures: Array<{ patientId: number; error: string }> = [];
+      const failures: Array<{ id: number; error: string }> = [];
 
-      for (const patient of patients) {
-        if (!patient.phone) continue;
+      for (const recipient of recipients) {
+        if (!recipient.phone) continue;
         try {
-          const waResult = await sendWhatsAppText(patient.phone, limitedMessage, {
+          const waResult = await sendWhatsAppText(recipient.phone, limitedMessage, {
             from: doctorWhatsapp.whatsappBusinessNumber,
           });
 
@@ -2658,35 +3455,57 @@ app.post(
             (waResult as any)?.messages?.[0]?.message_id ??
             null;
 
-          await prisma.message.create({
-            data: {
-              waMessageId: waId,
-              from: businessFrom,
-              to: patient.phone,
-              direction: "outgoing",
-              type: "text",
-              body: limitedMessage,
-              rawPayload: waResult,
-              patientId: patient.id,
-              doctorId,
-            },
-          });
+          if (isRetail) {
+            await prisma.message.create({
+              data: {
+                waMessageId: waId,
+                from: businessFrom,
+                to: recipient.phone!,
+                direction: "outgoing",
+                type: "text",
+                body: limitedMessage,
+                rawPayload: waResult,
+                retailClientId: (recipient as any).id,
+                doctorId,
+              },
+            });
+          } else {
+            await prisma.message.create({
+              data: {
+                waMessageId: waId,
+                from: businessFrom,
+                to: recipient.phone!,
+                direction: "outgoing",
+                type: "text",
+                body: limitedMessage,
+                rawPayload: waResult,
+                patientId: (recipient as any).id,
+                doctorId,
+              },
+            });
+          }
           sent += 1;
         } catch (error: any) {
           console.error(
-            `[Broadcast] Error al enviar a paciente ${patient.id}:`,
+            `[Broadcast] Error al enviar a ${isRetail ? "cliente" : "paciente"} ${
+              (recipient as any).id
+            }:`,
             error?.response?.data || error
           );
+          const failureDetail = extractWhatsappError(error);
           failures.push({
-            patientId: patient.id,
-            error: error?.message || "No pudimos enviar el mensaje",
+            id: (recipient as any).id,
+            error:
+              failureDetail?.message ||
+              error?.message ||
+              "No pudimos enviar el mensaje",
           });
         }
       }
 
       return res.json({
         ok: true,
-        total: patients.length,
+        total: recipients.length,
         sent,
         failed: failures.length,
         failures,
@@ -2696,9 +3515,12 @@ app.post(
         "Error en /api/whatsapp/broadcast:",
         error?.response?.data || error
       );
+      const waError = extractWhatsappError(error);
       return res.status(500).json({
         error: "No pudimos enviar el mensaje masivo",
-        detail: error?.message || String(error),
+        detail: waError?.message || error?.message || String(error),
+        twilioCode: waError?.code ?? null,
+        twilioStatus: waError?.status ?? null,
       });
     }
   }
@@ -2734,9 +3556,12 @@ app.post(
         "Error en /api/whatsapp/send-test:",
         error?.response?.data || error
       );
+      const waError = extractWhatsappError(error);
       res.status(500).json({
         error: "No se pudo enviar el mensaje de WhatsApp",
-        detail: error?.message || String(error),
+        detail: waError?.message || error?.message || String(error),
+        twilioCode: waError?.code ?? null,
+        twilioStatus: waError?.status ?? null,
       });
     }
   }
@@ -2831,30 +3656,210 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
       body: bodyText,
     });
 
-    // 1) Buscar / crear paciente
-    let patient: Patient | null = await prisma.patient.findFirst({
-      where: { phone: phoneE164, doctorId: doctor.id },
-    });
+    // 1) Rama retail: no creamos pacientes, trabajamos con RetailClient
+    if (doctor.businessType === "RETAIL") {
+      const productCatalog =
+        (
+          await prisma.product.findMany({
+            where: { doctorId: doctor.id },
+            orderBy: { name: "asc" },
+            select: { name: true },
+            take: 100,
+          })
+        ).map((p) => p.name) || [];
 
-    if (!patient) {
-      patient = await prisma.patient.create({
+      const retailClient = await ensureRetailClientForPhone({
+        doctorId: doctor.id,
+        phone: phoneE164,
+        name: profileName || null,
+      });
+
+      const savedIncoming = await prisma.message.create({
         data: {
-          fullName: profileName || "Paciente WhatsApp",
-          phone: phoneE164,
-          needsDni: true,
-          needsName: true,
-          needsBirthDate: true,
-          needsAddress: true,
-          needsInsurance: isMedicalDoctor,
-          needsConsultReason: isMedicalDoctor,
+          waMessageId: payload.MessageSid,
+          from: phoneE164,
+          to: doctorNumber,
+          direction: "incoming",
+          type: bodyText ? "text" : "other",
+          body: bodyText || null,
+          rawPayload: payload,
+          retailClientId: retailClient.id,
           doctorId: doctor.id,
         },
       });
-    }
 
-    if (!patient) {
+      console.log("💾 Mensaje guardado en DB (retail):", savedIncoming.id);
+
+      // Disponibilidad general (respeta botones de perfil en retail)
+      const doctorAvailabilityStatus = doctor.availabilityStatus || "available";
+      if (doctorAvailabilityStatus === "unavailable" || doctorAvailabilityStatus === "vacation") {
+        const responseText =
+          doctorAvailabilityStatus === "unavailable"
+            ? "No estamos tomando pedidos en este momento. Volvé a escribirnos más tarde 🙌"
+            : "Estamos de vacaciones y no estamos tomando pedidos por ahora. Te avisamos cuando volvamos ✅";
+
+        try {
+          const waResult = await sendWhatsAppText(
+            phoneE164,
+            responseText,
+            doctorWhatsappConfig
+          );
+          await prisma.message.create({
+            data: {
+              waMessageId: (waResult as any)?.sid ?? null,
+              from: doctorNumber,
+              to: phoneE164,
+              direction: "outgoing",
+              type: "text",
+              body: responseText,
+              rawPayload: waResult,
+              retailClientId: retailClient.id,
+              doctorId: doctor.id,
+            },
+          });
+        } catch (error) {
+          console.error("[Retail] Error enviando aviso de disponibilidad:", error);
+        }
+
+        return res.sendStatus(200);
+      }
+
+      if (!bodyText) return res.sendStatus(200);
+
+      const historyRaw = await prisma.message.findMany({
+        where: { retailClientId: retailClient.id },
+        orderBy: { createdAt: "asc" },
+        take: 20,
+      });
+
+      const recentMessages = historyRaw
+        .map((m) => ({
+          from: m.direction === "incoming" ? ("patient" as const) : ("doctor" as const),
+          text: m.body ?? "",
+        }))
+        .filter((m) => m.text.trim().length > 0);
+
+      const pendingOrdersForAgent = await prisma.order.findMany({
+        where: { doctorId: doctor.id, clientId: retailClient.id, status: "pending" },
+        include: { items: { include: { product: true } } },
+        orderBy: { createdAt: "desc" },
+      });
+
+      const agentResult = await runWhatsappAgent({
+        text: bodyText,
+        patientName: retailClient.fullName,
+        patientPhone: retailClient.phone || phoneE164,
+        doctorName: doctor.name,
+        doctorId: doctor.id,
+        businessType: doctor.businessType as "RETAIL",
+        timezone: DEFAULT_TIMEZONE,
+        availableSlots: [],
+        recentMessages,
+        patientProfile: {
+          consultReason: null,
+          pendingSlotISO: null,
+          pendingSlotHumanLabel: null,
+          pendingSlotExpiresAt: null,
+          pendingSlotReason: null,
+          dni: retailClient.dni,
+          birthDate: null,
+          address: retailClient.businessAddress,
+          needsDni: !retailClient.dni,
+          needsName: !retailClient.fullName,
+          needsBirthDate: false,
+          needsAddress: !retailClient.businessAddress,
+          needsInsurance: false,
+          needsConsultReason: false,
+          preferredDayISO: null,
+          preferredDayLabel: null,
+          preferredHourMinutes: null,
+          preferredDayHasAvailability: null,
+        },
+        doctorProfile: {},
+        productCatalog,
+        pendingOrders: pendingOrdersForAgent.map((o) => ({
+          sequenceNumber: o.sequenceNumber,
+          status: o.status,
+          items: o.items.map((it) => ({
+            name: it.product?.name || "producto",
+            quantity: it.quantity,
+          })),
+        })),
+      });
+
+      if (!agentResult) return res.sendStatus(200);
+
+      if (agentResult.profileUpdates) {
+        const info = agentResult.profileUpdates;
+        const update: Prisma.RetailClientUpdateInput = {};
+        if (info.name?.trim()) update.fullName = info.name.trim().slice(0, 120);
+        if (info.dni) {
+          const normalized = normalizeDniInput(info.dni);
+          if (normalized) update.dni = normalized;
+        }
+        if (info.address?.trim()) {
+          const addr = info.address.trim();
+          if (addr.length >= 5) update.businessAddress = addr.slice(0, 160);
+        }
+        if (Object.keys(update).length > 0) {
+          await prisma.retailClient.update({
+            where: { id: retailClient.id },
+            data: update,
+          });
+        }
+      }
+
+      const { replyToPatient, action } = agentResult;
+
+      const retailHandled = await handleRetailAgentAction({
+        doctor,
+        retailClient,
+        patient: null,
+        action,
+        replyToPatient,
+        phoneE164,
+        doctorNumber,
+        doctorWhatsappConfig,
+        rawText: bodyText,
+      });
+      if (retailHandled) return res.sendStatus(200);
+
+      if (replyToPatient) {
+        const messageWithHint = appendMenuHintForBusiness(
+          replyToPatient,
+          doctor.businessType as BusinessType
+        );
+        try {
+          const waResult = await sendWhatsAppText(
+            phoneE164,
+            messageWithHint,
+            doctorWhatsappConfig
+          );
+          await prisma.message.create({
+            data: {
+              waMessageId: (waResult as any)?.sid ?? null,
+              from: doctorNumber,
+              to: phoneE164,
+              direction: "outgoing",
+              type: "text",
+              body: replyToPatient,
+              rawPayload: waResult,
+              retailClientId: retailClient.id,
+              doctorId: doctor.id,
+            },
+          });
+        } catch (error) {
+          console.error("[RetailAgent] Error enviando respuesta genérica:", error);
+        }
+      }
+
       return res.sendStatus(200);
     }
+
+    // 1b) Buscar / crear paciente (solo salud)
+    let patient: Patient | null = await prisma.patient.findFirst({
+      where: { phone: phoneE164, doctorId: doctor.id },
+    });
 
     // 2) Guardar mensaje normal
     const savedIncoming = await prisma.message.create({
@@ -2875,8 +3880,9 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
 
     const doctorAvailabilityStatus = doctor.availabilityStatus || "available";
     if (
-      doctorAvailabilityStatus === "unavailable" ||
-      doctorAvailabilityStatus === "vacation"
+      doctor.businessType !== "RETAIL" &&
+      (doctorAvailabilityStatus === "unavailable" ||
+        doctorAvailabilityStatus === "vacation")
     ) {
       const responseText =
         doctorAvailabilityStatus === "unavailable"
@@ -2935,8 +3941,9 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
         mediaItems.length === 1
           ? "Perfecto, guardé tu archivo."
           : `Perfecto, guardé ${mediaItems.length} archivos.`;
-      const responseText = appendMenuHint(
-        `${acknowledgment} Podés enviar otro o escribir \"menu\" para volver.`
+      const responseText = appendMenuHintForBusiness(
+        `${acknowledgment} Podés enviar otro o escribir \"menu\" para volver.`,
+        doctor.businessType as BusinessType
       );
 
       try {
@@ -3002,6 +4009,17 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
       DEFAULT_TIMEZONE
     );
     const slotsForAgent = slotAlignment.slotsForAgent;
+    const productCatalog =
+      doctor.businessType === "RETAIL"
+        ? (
+            await prisma.product.findMany({
+              where: { doctorId: doctor.id },
+              orderBy: { name: "asc" },
+              select: { name: true },
+              take: 100,
+            })
+          ).map((p) => p.name)
+        : [];
 
     const activeAppointment = await prisma.appointment.findFirst({
       where: {
@@ -3034,46 +4052,51 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
       }))
       .filter((m) => m.text.trim().length > 0);
 
-    const flowResult = await handleConversationFlow({
-      incomingText: bodyText,
-      timezone: DEFAULT_TIMEZONE,
-      businessType: doctor.businessType as "HEALTH" | "BEAUTY" | "RETAIL",
-      patient: {
-        id: patient.id,
-        fullName: patient.fullName,
-        dni: patient.dni,
-        birthDate: patient.birthDate ? patient.birthDate.toISOString() : null,
-        address: patient.address,
-        conversationState: patient.conversationState,
-        conversationStateData: patient.conversationStateData ?? undefined,
-        needsDni: patient.needsDni,
-        needsName: patient.needsName,
-        needsBirthDate: patient.needsBirthDate,
-        needsAddress: patient.needsAddress,
-        needsInsurance: patient.needsInsurance,
-        needsConsultReason: patient.needsConsultReason,
-        insuranceProvider: patient.insuranceProvider,
-        consultReason: patient.consultReason,
-      },
-      availableSlots: slotsForAgent,
-      activeAppointment: activeAppointmentSummary,
-      findPatientByDni: async (dni: string) =>
-        prisma.patient.findFirst({
-          where: { doctorId: doctor.id, dni },
-          select: {
-            id: true,
-            fullName: true,
-            needsDni: true,
-            needsName: true,
-            needsBirthDate: true,
-            needsAddress: true,
-            needsInsurance: true,
-            needsConsultReason: true,
-          },
-        }),
-    });
+    const flowResult =
+      doctor.businessType === "RETAIL"
+        ? { handled: false }
+        : await handleConversationFlow({
+            incomingText: bodyText,
+            timezone: DEFAULT_TIMEZONE,
+            businessType: doctor.businessType as "HEALTH" | "BEAUTY" | "RETAIL",
+            patient: {
+              id: patient.id,
+              fullName: patient.fullName,
+              dni: patient.dni,
+              birthDate: patient.birthDate ? patient.birthDate.toISOString() : null,
+              address: patient.address,
+              conversationState: patient.conversationState,
+              conversationStateData: patient.conversationStateData ?? undefined,
+              needsDni: patient.needsDni,
+              needsName: patient.needsName,
+              needsBirthDate: patient.needsBirthDate,
+              needsAddress: patient.needsAddress,
+              needsInsurance: patient.needsInsurance,
+              needsConsultReason: patient.needsConsultReason,
+              insuranceProvider: patient.insuranceProvider,
+              consultReason: patient.consultReason,
+            },
+            availableSlots: slotsForAgent,
+            activeAppointment: activeAppointmentSummary,
+            findPatientByDni: async (dni: string) =>
+              prisma.patient.findFirst({
+                where: { doctorId: doctor.id, dni },
+                select: {
+                  id: true,
+                  fullName: true,
+                  needsDni: true,
+                  needsName: true,
+                  needsBirthDate: true,
+                  needsAddress: true,
+                  needsInsurance: true,
+                  needsConsultReason: true,
+                },
+              }),
+          });
 
-    if (flowResult.handled) {
+    if (doctor.businessType === "RETAIL") {
+      // Saltamos la máquina de estado de salud; el agente retail se maneja arriba.
+    } else if (flowResult.handled) {
       if (
         flowResult.mergeWithPatientId &&
         flowResult.mergeWithPatientId !== patient.id
@@ -3168,8 +4191,11 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
         outgoingMessage = cancelOutcome.message;
       }
 
-      if (outgoingMessage) {
-        const messageWithHint = appendMenuHint(outgoingMessage);
+    if (outgoingMessage) {
+      const messageWithHint = appendMenuHintForBusiness(
+        outgoingMessage,
+        doctor.businessType as BusinessType
+      );
         try {
           await sendWhatsAppText(
             phoneE164,
@@ -3227,347 +4253,147 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
           : null,
     };
 
-    const agentResult = await runWhatsappAgent({
-      text: bodyText,
-      patientName: patient.fullName,
-      patientPhone: patient.phone!,
-      doctorName: doctor.name,
-      doctorId: doctor.id,
-      businessType: doctor.businessType as "HEALTH" | "BEAUTY" | "RETAIL",
-      timezone: DEFAULT_TIMEZONE,
-      availableSlots: slotsForAgent,
-      recentMessages,
-      patientProfile: patientProfilePayload,
-      doctorProfile: {
-        specialty: doctor.specialty ?? null,
-        clinicName: doctor.clinicName ?? null,
-        officeAddress: doctor.clinicAddress ?? null,
-        officeCity: null,
-        officeMapsUrl: null,
-        officeDays: doctor.officeDays ?? null,
-        officeHours: doctor.officeHours ?? null,
-        contactPhone: doctor.contactPhone ?? null,
-        consultationPrice,
-        emergencyConsultationPrice,
-        additionalNotes: doctor.extraNotes ?? null,
-      },
-    });
+    // Rama retail: directo al handler y saltar lógica de salud
+    if (doctor.businessType === "RETAIL") {
+      const agentResult = await runWhatsappAgent({
+        text: bodyText,
+        patientName: patient.fullName,
+        patientPhone: patient.phone!,
+        doctorName: doctor.name,
+        doctorId: doctor.id,
+        businessType: doctor.businessType as "RETAIL",
+        timezone: DEFAULT_TIMEZONE,
+        availableSlots: [],
+        recentMessages,
+        patientProfile: patientProfilePayload,
+        doctorProfile: {},
+        productCatalog,
+      });
 
-    if (!agentResult) {
+      if (!agentResult) return res.sendStatus(200);
+
+      if (agentResult.profileUpdates) {
+        const profileUpdates = agentResult.profileUpdates;
+        const updateData: Prisma.PatientUpdateInput = {};
+
+        const normalizedName = normalizeAgentProvidedName(profileUpdates.name);
+        if (normalizedName) {
+          updateData.fullName = normalizedName;
+          updateData.needsName = false;
+        }
+
+        if (profileUpdates.dni) {
+          const normalizedDni = normalizeDniInput(profileUpdates.dni);
+          if (normalizedDni) {
+            updateData.dni = normalizedDni;
+            updateData.needsDni = false;
+          }
+        }
+
+        if (profileUpdates.address) {
+          const cleanedAddress = profileUpdates.address.trim();
+          if (cleanedAddress.length >= 5) {
+            updateData.address = cleanedAddress.slice(0, 160);
+            updateData.needsAddress = false;
+          }
+        }
+
+        if (Object.keys(updateData).length > 0) {
+          try {
+            patient = await prisma.patient.update({
+              where: { id: patient.id },
+              data: updateData,
+            });
+          } catch (error: any) {
+            if (error?.code === "P2002" && error?.meta?.modelName === "Patient") {
+              console.warn("[RetailAgent] DNI en uso, omitiendo actualización del paciente");
+            } else {
+              throw error;
+            }
+          }
+        }
+
+        // Si es retail, reflejar también en retailClient
+        const retailUpdate: Prisma.RetailClientUpdateInput = {};
+        if (updateData.fullName) retailUpdate.fullName = updateData.fullName;
+        if (updateData.dni) retailUpdate.dni = updateData.dni as any;
+        if (updateData.address) retailUpdate.businessAddress = updateData.address as any;
+
+        if (Object.keys(retailUpdate).length > 0) {
+          const retailClient = await prisma.retailClient.findFirst({
+            where: { doctorId: doctor.id, patientId: patient.id },
+          });
+          if (retailClient) {
+            await prisma.retailClient.update({
+              where: { id: retailClient.id },
+              data: retailUpdate,
+            });
+          }
+        }
+      }
+
+      const { replyToPatient, action } = agentResult;
+
+      const retailHandled = await handleRetailAgentAction({
+        doctor,
+        patient,
+        retailClient: retailClient,
+        action,
+        replyToPatient,
+        phoneE164,
+        doctorNumber,
+        doctorWhatsappConfig,
+        rawText: bodyText,
+      });
+      if (retailHandled) return res.sendStatus(200);
+
+      if (replyToPatient) {
+        const messageWithHint = appendMenuHintForBusiness(
+          replyToPatient,
+          doctor.businessType as BusinessType
+        );
+        try {
+          const waResult = await sendWhatsAppText(
+            phoneE164,
+            messageWithHint,
+            doctorWhatsappConfig
+          );
+          await prisma.message.create({
+            data: {
+              waMessageId: (waResult as any)?.sid ?? null,
+              from: doctorNumber,
+              to: phoneE164,
+              direction: "outgoing",
+              type: "text",
+              body: messageWithHint,
+              rawPayload: waResult,
+              patientId: patient.id,
+              doctorId: doctor.id,
+            },
+          });
+        } catch (error) {
+          console.error("[RetailAgent] Error enviando respuesta genérica:", error);
+        }
+      }
+
       return res.sendStatus(200);
     }
 
-    if (agentResult.profileUpdates) {
-      const profileUpdates = agentResult.profileUpdates;
-      const updateData: Prisma.PatientUpdateInput = {};
-
-      const normalizedName = normalizeAgentProvidedName(profileUpdates.name);
-      if (normalizedName) {
-        updateData.fullName = normalizedName;
-        updateData.needsName = false;
-      }
-
-      if (profileUpdates.insurance) {
-        const normalizedInsurance =
-          normalizeInsuranceAnswer(profileUpdates.insurance) ||
-          profileUpdates.insurance.trim();
-        if (normalizedInsurance) {
-          updateData.insuranceProvider = normalizedInsurance.slice(0, 120);
-          updateData.needsInsurance = false;
-        }
-      }
-
-      if (profileUpdates.consultReason) {
-        const normalizedReason = sanitizeReason(profileUpdates.consultReason, {
-          allowSchedulingLike: true,
-        });
-        if (normalizedReason) {
-          updateData.consultReason = normalizedReason;
-          updateData.needsConsultReason = false;
-        }
-      }
-
-      if (profileUpdates.dni) {
-        const normalizedDni = normalizeDniInput(profileUpdates.dni);
-        if (normalizedDni) {
-          updateData.dni = normalizedDni;
-          updateData.needsDni = false;
-        }
-      }
-
-      if (profileUpdates.birthDate) {
-        const parsedBirthDate = parseBirthDateInput(profileUpdates.birthDate);
-        if (parsedBirthDate) {
-          updateData.birthDate = parsedBirthDate;
-          updateData.needsBirthDate = false;
-        }
-      }
-
-      if (profileUpdates.address) {
-        const cleanedAddress = profileUpdates.address.trim();
-        if (cleanedAddress.length >= 5) {
-          updateData.address = cleanedAddress.slice(0, 160);
-          updateData.needsAddress = false;
-        }
-      }
-
-      if (Object.keys(updateData).length > 0) {
-        patient = await prisma.patient.update({
-          where: { id: patient.id },
-          data: updateData,
-        });
-      }
-    }
-
-    const { replyToPatient, action } = agentResult;
-
-    let outgoingMessage = replyToPatient;
-
-    if (action.type === "LIST_SLOTS") {
-      const preferenceState: PatientPreferenceState = {
-        preferredDayISO: patient.preferredDayISO ?? null,
-        preferredHour:
-          typeof patient.preferredHour === "number"
-            ? patient.preferredHour
-            : null,
-      };
-      const preferredSlot =
-        pickBestSlotForPatient(action.slots, preferenceState, DEFAULT_TIMEZONE) ??
-        action.slots?.[0] ??
-        (agentResult.pendingSlotHint
-          ? {
-              startISO: agentResult.pendingSlotHint.startISO,
-              humanLabel: agentResult.pendingSlotHint.humanLabel,
-            }
-          : null);
-
-      if (preferredSlot) {
-        const slotDate = new Date(preferredSlot.startISO);
-        if (!isNaN(slotDate.getTime())) {
-          const pendingReason =
-            sanitizeReason(action.reason, { allowSchedulingLike: true }) ||
-            sanitizeReason(agentResult.pendingSlotHint?.reason, {
-              allowSchedulingLike: true,
-            }) ||
-            sanitizeReason(patient.consultReason, {
-              allowSchedulingLike: true,
-            }) ||
-            sanitizeReason(bodyText) ||
-            patient.pendingSlotReason;
-
-          const pendingData: any = {
-            pendingSlotISO: slotDate,
-            pendingSlotHumanLabel: preferredSlot.humanLabel,
-            pendingSlotExpiresAt: addMinutes(new Date(), 30),
-            pendingSlotReason: pendingReason,
-          };
-
-          if (!preferenceUpdatedThisMessage) {
-            pendingData.preferredDayISO = startOfDayLocal(
-              slotDate,
-              DEFAULT_TIMEZONE
-            );
-            pendingData.preferredHour = getMinutesOfDayLocal(
-              slotDate,
-              DEFAULT_TIMEZONE
-            );
-          }
-
-          if (pendingReason) {
-            pendingData.consultReason = pendingReason;
-            pendingData.needsConsultReason = false;
-          }
-
-          patient = await prisma.patient.update({
-            where: { id: patient.id },
-            data: pendingData,
-          });
-        }
-      }
-    }
-
-    if (action.type === "CREATE_APPOINTMENT") {
-      const pendingDataMissing = [];
-      if (patient.needsDni) pendingDataMissing.push("tu DNI");
-      if (patient.needsName) pendingDataMissing.push("tu nombre completo");
-      if (patient.needsBirthDate)
-        pendingDataMissing.push("tu fecha de nacimiento");
-      if (patient.needsAddress)
-        pendingDataMissing.push("tu dirección");
-      if (patient.needsInsurance) pendingDataMissing.push("obra social/prepaga");
-      if (patient.needsConsultReason) pendingDataMissing.push("el motivo de la consulta");
-
-      if (pendingDataMissing.length) {
-        outgoingMessage = `Antes de confirmar un turno necesito ${
-          pendingDataMissing.length === 1
-            ? pendingDataMissing[0]
-            : `${pendingDataMissing.slice(0, -1).join(", ")} y ${
-                pendingDataMissing[pendingDataMissing.length - 1]
-              }`
-        }. ¿Me lo compartís?`;
-      } else {
-        const matchingSlot = availableSlots.find((slot) => {
-          const slotTime = new Date(slot.startISO).getTime();
-          const actionTime = new Date(action.dateTimeISO).getTime();
-          return !Number.isNaN(slotTime) && slotTime === actionTime;
-        });
-
-        if (!matchingSlot) {
-          console.warn(
-            "[AI Turnos] Slot confirmado no coincide con disponibilidad",
-            { requested: action.dateTimeISO }
-          );
-          outgoingMessage =
-            "Ese horario no figura como disponible en el sistema. Decime de nuevo qué día y horario te sirve y te paso los turnos correctos 😊.";
-        } else {
-          const slotDate = new Date(matchingSlot.startISO);
-          if (isNaN(slotDate.getTime())) {
-            outgoingMessage =
-              "No pude confirmar ese turno porque la hora no es válida. Decime nuevamente el horario que te sirve.";
-          } else {
-            const reason =
-              sanitizeReason(action.reason, { allowSchedulingLike: true }) ||
-              sanitizeReason(patient.pendingSlotReason, {
-                allowSchedulingLike: true,
-              }) ||
-              sanitizeReason(patient.consultReason, {
-                allowSchedulingLike: true,
-              }) ||
-              sanitizeReason(bodyText) ||
-              "Consulta generada desde WhatsApp";
-
-            const preferenceState: PatientPreferenceState = {
-              preferredDayISO: patient.preferredDayISO ?? null,
-              preferredHour:
-                typeof patient.preferredHour === "number"
-                  ? patient.preferredHour
-                  : null,
-            };
-
-            if (
-              !isSlotAlignedWithPreference(
-                preferenceState,
-                slotDate,
-                DEFAULT_TIMEZONE
-              )
-            ) {
-              const preferenceDesc = describePatientPreference(
-                preferenceState,
-                DEFAULT_TIMEZONE
-              );
-              const slotLabel = formatSlotLabel(slotDate, DEFAULT_TIMEZONE);
-              outgoingMessage = preferenceDesc
-                ? `Entendí que buscabas un turno ${preferenceDesc}, pero el horario disponible ahora es ${slotLabel}. ¿Te sirve igualmente o prefieres que busque otro?`
-                : `El horario disponible es ${slotLabel}. ¿Querés que lo confirme o busco otro?`;
-            } else {
-              const existingFutureAppointment =
-                await prisma.appointment.findFirst({
-                  where: {
-                    doctorId: doctor.id,
-                    patientId: patient.id,
-                    status: { in: ["scheduled", "confirmed"] },
-                    dateTime: {
-                      gte: new Date(),
-                    },
-                  },
-                  orderBy: { dateTime: "asc" },
-                });
-              try {
-                if (
-                  existingFutureAppointment &&
-                  areDatesWithinSameMinute(
-                    existingFutureAppointment.dateTime,
-                    slotDate
-                  )
-                ) {
-                  await prisma.appointment.update({
-                    where: { id: existingFutureAppointment.id },
-                    data: {
-                      type: reason || existingFutureAppointment.type,
-                    },
-                  });
-                } else {
-                  await prisma.appointment.create({
-                    data: {
-                      dateTime: slotDate,
-                      type: reason || "Consulta generada desde WhatsApp",
-                      status: "scheduled",
-                      price: 0,
-                      paid: false,
-                      source: "whatsapp",
-                      doctorId: doctor.id,
-                      patientId: patient.id,
-                    },
-                  });
-
-                  if (existingFutureAppointment) {
-                    await prisma.appointment.update({
-                      where: { id: existingFutureAppointment.id },
-                      data: {
-                        status: "cancelled_by_patient",
-                      },
-                    });
-                  }
-                }
-
-                patient = await prisma.patient.update({
-                  where: { id: patient.id },
-                  data: {
-                    consultReason: reason,
-                    needsConsultReason: !!reason
-                      ? false
-                      : patient.needsConsultReason,
-                    pendingSlotISO: null,
-                    pendingSlotHumanLabel: null,
-                    pendingSlotExpiresAt: null,
-                    pendingSlotReason: null,
-                    preferredDayISO: startOfDayLocal(slotDate, DEFAULT_TIMEZONE),
-                    preferredHour: getMinutesOfDayLocal(
-                      slotDate,
-                      DEFAULT_TIMEZONE
-                    ),
-                  },
-                });
-              } catch (error) {
-                console.error("[AI Turnos] Error creando turno:", error);
-                outgoingMessage =
-                  "Intenté registrar ese turno pero hubo un problema. Probemos con otro horario o avisame si querés que te derive a recepción.";
-              }
-            }
-          }
-        }
-      }
-    }
-
-    if (outgoingMessage) {
-      const messageWithHint = appendMenuHint(outgoingMessage);
-      try {
-        const waResult = await sendWhatsAppText(
-          phoneE164,
-          messageWithHint,
-          doctorWhatsappConfig
-        );
-
-        await prisma.message.create({
-          data: {
-            waMessageId: (waResult as any)?.sid ?? null,
-            from: doctorNumber,
-            to: phoneE164,
-            direction: "outgoing",
-            type: "text",
-            body: messageWithHint,
-            rawPayload: waResult,
-            patientId: patient.id,
-            doctorId: doctor.id,
-          },
-        });
-      } catch (error) {
-        console.error(
-          "[Twilio Webhook] Error enviando respuesta del agente:",
-          error
-        );
-      }
-    }
+    // Rama salud: delegamos en handler de salud
+    await handleHealthWebhookMessage({
+      doctor,
+      patient,
+      bodyText,
+      doctorNumber,
+      phoneE164,
+      doctorWhatsappConfig,
+      recentMessages,
+      availableSlots,
+      slotsForAgent,
+      productCatalog,
+      activeAppointment,
+      timezone: DEFAULT_TIMEZONE,
+    });
 
     return res.sendStatus(200);
   } catch (error) {
@@ -3836,6 +4662,7 @@ app.get(
         email: doc.email,
         availabilityStatus: doc.availabilityStatus,
         profileImageUrl: doc.profileImageUrl ?? null,
+        ticketLogoUrl: (doc as any).ticketLogoUrl ?? null,
 
         // estos los mapeamos desde tus campos actuales
         specialty: (doc as any).specialty ?? null,
@@ -3880,6 +4707,7 @@ app.put(
       const {
         specialty,
         clinicName,
+        ticketLogoUrl,
         officeAddress,
         officeDays,
         officeHours,
@@ -3895,6 +4723,7 @@ app.put(
       } = req.body as {
         specialty?: string | null;
         clinicName?: string | null;
+        ticketLogoUrl?: string | null;
         officeAddress?: string | null;
         officeDays?: string | null;
         officeHours?: string | null;
@@ -3933,6 +4762,7 @@ app.put(
       const updateData: Prisma.DoctorUpdateInput = {
         specialty: specialty ?? null,
         clinicName: clinicName ?? null,
+        ticketLogoUrl: ticketLogoUrl ?? null,
         // officeAddress del front → clinicAddress en la DB
         clinicAddress: officeAddress ?? null,
         officeDays: officeDays ?? null,
@@ -4001,6 +4831,78 @@ app.post(
   }
 );
 
+app.post(
+  "/api/me/profile/ticket-logo",
+  authMiddleware,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const doctorId = req.doctorId!;
+      const imageBase64 = req.body?.imageBase64;
+      if (typeof imageBase64 !== "string" || !imageBase64.trim()) {
+        return res.status(400).json({
+          error: "Mandá la imagen en formato base64.",
+        });
+      }
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { ticketLogoUrl: true },
+      });
+      if (!doctor) {
+        return res.status(404).json({ error: "Doctor no encontrado" });
+      }
+      const profileImageUrl = await saveProfileImageForDoctor(
+        doctorId,
+        imageBase64,
+        doctor.ticketLogoUrl
+      );
+      await prisma.doctor.update({
+        where: { id: doctorId },
+        data: { ticketLogoUrl: profileImageUrl },
+      });
+      res.json({ ticketLogoUrl: profileImageUrl });
+    } catch (error: any) {
+      console.error("Error en POST /api/me/profile/ticket-logo:", error);
+      res.status(500).json({
+        error:
+          error?.message || "No pudimos actualizar el logo.",
+      });
+    }
+  }
+);
+
+app.delete(
+  "/api/me/profile/ticket-logo",
+  authMiddleware,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { ticketLogoUrl: true },
+      });
+      if (!doctor) {
+        return res.status(404).json({ error: "Doctor no encontrado" });
+      }
+
+      const prevUrl = doctor.ticketLogoUrl;
+      await prisma.doctor.update({
+        where: { id: doctorId },
+        data: { ticketLogoUrl: null },
+      });
+      if (prevUrl) {
+        await removeUploadedFile(prevUrl).catch(() => {});
+      }
+      res.json({ ticketLogoUrl: null });
+    } catch (error: any) {
+      console.error("Error en DELETE /api/me/profile/ticket-logo:", error);
+      res.status(500).json({
+        error:
+          error?.message || "No pudimos eliminar el logo.",
+      });
+    }
+  }
+);
+
 app.delete(
   "/api/me/profile/photo",
   authMiddleware,
@@ -4014,7 +4916,7 @@ app.delete(
       if (!doctor) {
         return res.status(404).json({ error: "Doctor no encontrado" });
       }
-      await removeProfileImageFile(doctor.profileImageUrl);
+      await removeUploadedFile(doctor.profileImageUrl);
       await prisma.doctor.update({
         where: { id: doctorId },
         data: { profileImageUrl: null },
@@ -4039,12 +4941,63 @@ app.get(
   async (req: AuthRequest, res: Response) => {
     try {
       const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+      if (!doctor) {
+        return res.status(404).json({ error: "Doctor no encontrado" });
+      }
       const search = (req.query.q as string | undefined)?.trim();
 
-      const where: Prisma.PatientWhereInput = {
-        doctorId,
-      };
+      // Rama retail: listamos clientes retail (no pacientes de salud)
+      if (doctor.businessType === "RETAIL") {
+        const clients = await prisma.retailClient.findMany({
+          where: {
+            doctorId,
+            ...(search
+              ? {
+                  OR: [
+                    { fullName: { contains: search } },
+                    { phone: { contains: search } },
+                    { dni: { contains: search } },
+                    { businessAddress: { contains: search } },
+                  ],
+                }
+              : {}),
+          },
+          orderBy: { id: "desc" },
+          take: 50,
+          include: {
+            patient: true,
+          },
+        });
 
+        const mapped = clients.map((client) => {
+          const patient = client.patient;
+          const name = client.fullName || patient?.fullName || "Cliente WhatsApp";
+          const phone = client.phone || patient?.phone || "";
+          const dni = client.dni || patient?.dni || null;
+          const address = client.businessAddress || patient?.address || null;
+          return {
+            id: client.id,
+            fullName: name,
+            phone,
+            dni,
+            address,
+            needsName: !name || name === "Cliente WhatsApp",
+            needsDni: !dni,
+            needsAddress: !address,
+            tags: [],
+            isProfileComplete: Boolean(name && dni && address),
+          };
+        });
+
+        return res.json({ patients: mapped });
+      }
+
+      // Rama salud: pacientes tradicionales
+      const where: Prisma.PatientWhereInput = { doctorId };
       if (search && search.length > 0) {
         where.AND = [
           {
@@ -4094,16 +5047,110 @@ app.get(
   async (req: AuthRequest, res: Response) => {
     try {
       const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+      if (!doctor) {
+        return res.status(404).json({ error: "Doctor no encontrado" });
+      }
       const patientId = Number(req.params.id);
       if (isNaN(patientId)) {
         return res.status(400).json({ error: "patientId inválido" });
+      }
+
+      if (doctor.businessType === "RETAIL") {
+        const client = await prisma.retailClient.findFirst({
+          where: { doctorId, id: patientId },
+          include: { patient: true, tags: true },
+        });
+        if (!client) {
+          return res.status(404).json({ error: "Cliente no encontrado" });
+        }
+        const orders = await prisma.order.findMany({
+          where: { doctorId, clientId: client.id },
+          orderBy: { createdAt: "desc" },
+          include: { items: { include: { product: true } }, attachments: true },
+        });
+        const patient = client.patient;
+        const paymentTotals = orders.reduce(
+          (acc, order) => {
+            const billed = order.totalAmount ?? 0;
+            const paid = Math.min(order.paidAmount ?? 0, billed);
+            const isCancelled = order.status === "cancelled";
+            if (!isCancelled) {
+              acc.totalBilled += billed;
+              acc.totalPaid += paid;
+              acc.outstanding += Math.max(billed - (order.paidAmount ?? 0), 0);
+            }
+            return acc;
+          },
+          { totalBilled: 0, totalPaid: 0, outstanding: 0 }
+        );
+        const tags: Array<{ id: number; label: string; severity: PatientTagSeverity }> = [];
+        const dbTags =
+          client.tags?.map((t) => ({
+            id: t.id,
+            label: t.label,
+            severity: t.severity,
+          })) ?? [];
+        tags.push(...dbTags);
+        if (paymentTotals.totalBilled > 0) {
+          const scoreRaw =
+            paymentTotals.totalBilled > 0
+              ? Math.round((paymentTotals.totalPaid / paymentTotals.totalBilled) * 10)
+              : 0;
+          const score = Math.max(0, Math.min(10, scoreRaw));
+          const scoreSeverity: PatientTagSeverity =
+            score >= 8 ? "info" : score >= 5 ? "medium" : "high";
+          tags.push({
+            id: -3,
+            label: `Score de pago: ${score}/10`,
+            severity: scoreSeverity,
+          });
+        }
+        if (paymentTotals.outstanding > 0) {
+          tags.unshift({
+            id: -1,
+            label: `Falta de pago ($${paymentTotals.outstanding.toLocaleString("es-AR")})`,
+            severity: "high",
+          });
+        } else if (paymentTotals.totalBilled > 0) {
+          tags.unshift({
+            id: -2,
+            label: "Pago al día",
+            severity: "info",
+          });
+        }
+
+        return res.json({
+          patient: {
+            id: client.id,
+            fullName: client.fullName || patient?.fullName || "Cliente WhatsApp",
+            phone: client.phone || patient?.phone || null,
+            dni: client.dni || patient?.dni || null,
+            address: client.businessAddress || patient?.address || null,
+            tags,
+          },
+          appointments: [],
+          openConsultations: [],
+          orders: orders.map((order) => ({
+            ...serializeOrderRecord(order),
+            items: order.items.map((item) => ({
+              id: item.id,
+              productId: item.productId,
+              productName: item.product?.name || "Producto",
+              quantity: item.quantity,
+              unitPrice: item.unitPrice,
+            })),
+          })),
+        });
       }
 
       const patient = await prisma.patient.findFirst({
         where: { id: patientId, doctorId },
         include: {
           appointments: {
-            where: { source: "whatsapp" },
             orderBy: { dateTime: "desc" },
             take: 50,
           },
@@ -4305,16 +5352,66 @@ app.get(
   async (req: AuthRequest, res: Response) => {
     try {
       const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+      if (!doctor) {
+        return res.status(404).json({ error: "Doctor no encontrado" });
+      }
       const patientId = Number(req.params.id);
       if (isNaN(patientId)) {
         return res.status(400).json({ error: "patientId inválido" });
+      }
+
+      if (doctor.businessType === "RETAIL") {
+        const client = await prisma.retailClient.findFirst({
+          where: { id: patientId, doctorId },
+          include: {
+            notes: {
+              orderBy: { createdAt: "desc" },
+              take: 20,
+            },
+            orders: {
+              where: { status: { in: ["pending", "confirmed"] } },
+              orderBy: { createdAt: "desc" },
+              include: { items: { include: { product: true } } },
+              take: 10,
+            },
+          },
+        });
+        if (!client) {
+          return res.status(404).json({ error: "Cliente no encontrado" });
+        }
+
+        const summary = await generateRetailClientSummary({
+          client: {
+            fullName: client.fullName,
+            address: client.businessAddress,
+            phone: client.phone,
+          },
+          notes: client.notes.map((n) => ({
+            content: n.content,
+            createdAt: n.createdAt,
+          })),
+          orders:
+            client.orders?.map((o) => ({
+              createdAt: o.createdAt,
+              status: o.status,
+              items: o.items.map((it) => ({
+                name: it.product?.name || "producto",
+                quantity: it.quantity,
+              })),
+            })) || [],
+        });
+
+        return res.json({ summary });
       }
 
       const patient = await prisma.patient.findFirst({
         where: { id: patientId, doctorId },
         include: {
           appointments: {
-            where: { source: "whatsapp" },
             orderBy: { dateTime: "desc" },
             take: 10,
           },
@@ -4451,9 +5548,38 @@ app.get(
   async (req: AuthRequest, res: Response) => {
     try {
       const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+      if (!doctor) {
+        return res.status(404).json({ error: "Doctor no encontrado" });
+      }
       const patientId = Number(req.params.id);
       if (isNaN(patientId)) {
         return res.status(400).json({ error: "patientId inválido" });
+      }
+
+      if (doctor.businessType === "RETAIL") {
+        const client = await prisma.retailClient.findFirst({
+          where: { id: patientId, doctorId },
+          select: { id: true },
+        });
+        if (!client) {
+          return res.status(404).json({ error: "Cliente no encontrado" });
+        }
+        const notes = await prisma.retailClientNote.findMany({
+          where: { retailClientId: client.id, doctorId },
+          orderBy: { createdAt: "desc" },
+          take: 100,
+        });
+        return res.json({
+          notes: notes.map((note) => ({
+            id: note.id,
+            content: note.content,
+            createdAt: note.createdAt.toISOString(),
+          })),
+        });
       }
 
       const patient = await prisma.patient.findFirst({
@@ -4493,6 +5619,13 @@ app.post(
   async (req: AuthRequest, res: Response) => {
     try {
       const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+      if (!doctor) {
+        return res.status(404).json({ error: "Doctor no encontrado" });
+      }
       const patientId = Number(req.params.id);
       if (isNaN(patientId)) {
         return res.status(400).json({ error: "patientId inválido" });
@@ -4503,6 +5636,35 @@ app.post(
         return res
           .status(400)
           .json({ error: "Necesitamos una nota con al menos un carácter." });
+      }
+
+      if (doctor.businessType === "RETAIL") {
+        const client = await prisma.retailClient.findFirst({
+          where: { id: patientId, doctorId },
+          select: { id: true },
+        });
+        if (!client) {
+          return res.status(404).json({ error: "Cliente no encontrado" });
+        }
+        const note = await prisma.retailClientNote.create({
+          data: {
+            content,
+            retailClientId: client.id,
+            doctorId,
+          },
+          select: {
+            id: true,
+            content: true,
+            createdAt: true,
+          },
+        });
+        return res.json({
+          note: {
+            id: note.id,
+            content: note.content,
+            createdAt: note.createdAt.toISOString(),
+          },
+        });
       }
 
       const patient = await prisma.patient.findFirst({
@@ -4563,6 +5725,41 @@ app.post(
 
       const severity = normalizePatientTagSeverity(req.body?.severity);
 
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+
+      if (!doctor) {
+        return res.status(404).json({ error: "Doctor no encontrado" });
+      }
+
+      if (doctor.businessType === "RETAIL") {
+        const client = await prisma.retailClient.findFirst({
+          where: { id: patientId, doctorId },
+          select: { id: true },
+        });
+        if (!client) {
+          return res.status(404).json({ error: "Cliente no encontrado" });
+        }
+        const tag = await prisma.retailClientTag.create({
+          data: {
+            label,
+            severity,
+            clientId: client.id,
+            doctorId,
+          },
+        });
+        return res.json({
+          tag: {
+            id: tag.id,
+            label: tag.label,
+            severity: tag.severity,
+            createdAt: tag.createdAt.toISOString(),
+          },
+        });
+      }
+
       const patient = await prisma.patient.findFirst({
         where: { id: patientId, doctorId },
         select: { id: true },
@@ -4604,6 +5801,24 @@ app.delete(
         return res.status(400).json({ error: "Parámetros inválidos" });
       }
 
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+
+      if (doctor?.businessType === "RETAIL") {
+        const tag = await prisma.retailClientTag.findFirst({
+          where: { id: tagId, clientId: patientId, doctorId },
+        });
+        if (!tag) {
+          return res.status(404).json({ error: "Etiqueta no encontrada" });
+        }
+        await prisma.retailClientTag.delete({
+          where: { id: tagId },
+        });
+        return res.json({ ok: true });
+      }
+
       const tag = await prisma.patientTag.findFirst({
         where: { id: tagId, patientId, doctorId },
       });
@@ -4632,28 +5847,1434 @@ app.get(
   async (req: AuthRequest, res: Response) => {
     try {
       const doctorId = req.doctorId!;
-      const segments = await prisma.patientTag.groupBy({
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+      const tagSegments = await prisma.patientTag.groupBy({
         by: ["label", "severity"],
         where: { doctorId },
-        _count: {
-          _all: true,
-        },
-        orderBy: {
-          label: "asc",
-        },
+        _count: { _all: true },
+        orderBy: { label: "asc" },
       });
 
-      res.json({
-        segments: segments.map((segment) => ({
+      const segments: Array<{ label: string; severity: PatientTagSeverity; count: number }> =
+        tagSegments.map((segment) => ({
           label: segment.label,
           severity: segment.severity,
           count: segment._count?._all ?? 0,
-        })),
-      });
+        }));
+
+      if (doctor?.businessType === "RETAIL") {
+        const retailSegments = await prisma.retailClientTag.groupBy({
+          by: ["label", "severity"],
+          where: { doctorId },
+          _count: { _all: true },
+          orderBy: { label: "asc" },
+        });
+        retailSegments.forEach((segment) => {
+          segments.push({
+            label: segment.label,
+            severity: segment.severity,
+            count: segment._count?._all ?? 0,
+          });
+        });
+        const orders = await prisma.order.findMany({
+          where: { doctorId, status: { in: ["pending", "confirmed"] }, clientId: { not: null } },
+          select: { clientId: true, totalAmount: true, paidAmount: true },
+        });
+        const byClient = new Map<number, { billed: number; paid: number }>();
+        for (const o of orders) {
+          if (!o.clientId) continue;
+          const agg = byClient.get(o.clientId) || { billed: 0, paid: 0 };
+          agg.billed += o.totalAmount ?? 0;
+          agg.paid += Math.max(0, o.paidAmount ?? 0);
+          byClient.set(o.clientId, agg);
+        }
+        let debtors = 0;
+        let upToDate = 0;
+        for (const agg of byClient.values()) {
+          const outstanding = Math.max(agg.billed - agg.paid, 0);
+          if (outstanding > 0) debtors += 1;
+          else if (agg.billed > 0) upToDate += 1;
+        }
+        if (debtors > 0) {
+          segments.push({
+            label: "Falta de pago",
+            severity: "high",
+            count: debtors,
+          });
+        }
+        if (upToDate > 0) {
+          segments.push({
+            label: "Pago al día",
+            severity: "info",
+            count: upToDate,
+          });
+        }
+      }
+
+      res.json({ segments });
     } catch (error: any) {
       console.error("Error en /api/patient-tags:", error);
       res.status(500).json({
         error: "No pudimos obtener las etiquetas.",
+      });
+    }
+  }
+);
+
+/**
+ * Productos (stock)
+ */
+app.get(
+  "/api/products",
+  authMiddleware,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const doctorId = req.doctorId!;
+      const products = await prisma.product.findMany({
+        where: { doctorId },
+        include: {
+          tags: {
+            orderBy: { createdAt: "desc" },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+      });
+
+      res.json({
+        products: products.map(serializeProduct),
+      });
+    } catch (error: any) {
+      console.error("Error en GET /api/products:", error);
+      res.status(500).json({
+        error: "No pudimos obtener el stock.",
+      });
+    }
+  }
+);
+
+app.post(
+  "/api/products",
+  authMiddleware,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const doctorId = req.doctorId!;
+      const {
+        name,
+        description,
+        imageUrl,
+        imageBase64,
+        categories,
+        price,
+        quantity,
+      } =
+        req.body as {
+          name?: string;
+          description?: string | null;
+          imageUrl?: string | null;
+          imageBase64?: string | null;
+          categories?: unknown;
+          price?: number | string | null;
+          quantity?: number | string | null;
+        };
+
+      const sanitizedName = sanitizeProductName(name);
+      if (!sanitizedName) {
+        return res.status(400).json({
+          error: "Ingresá un nombre para el producto.",
+        });
+      }
+
+      const parsedPrice = parseNonNegativeInteger(price ?? 0);
+      if (parsedPrice === null) {
+        return res.status(400).json({
+          error: "El precio debe ser un número válido.",
+        });
+      }
+
+      const parsedQuantity = parseNonNegativeInteger(quantity ?? 0);
+      if (parsedQuantity === null) {
+        return res.status(400).json({
+          error: "La cantidad debe ser un número válido.",
+        });
+      }
+
+      const normalizedImageBase64 =
+        typeof imageBase64 === "string" && imageBase64.trim().length > 0
+          ? imageBase64.trim()
+          : null;
+
+      const normalizedCategories = sanitizeProductCategories(categories);
+
+      const product = await prisma.product.create({
+        data: {
+          doctorId,
+          name: sanitizedName,
+          description: sanitizeOptionalText(description),
+          imageUrl: normalizedImageBase64
+            ? null
+            : sanitizeOptionalText(imageUrl, 500),
+          categories: normalizedCategories,
+          price: parsedPrice,
+          quantity: parsedQuantity,
+        },
+        include: {
+          tags: {
+            orderBy: { createdAt: "desc" },
+          },
+        },
+      });
+
+      let finalProduct = product;
+
+      if (normalizedImageBase64) {
+        let uploadedImageUrl: string | null = null;
+        try {
+          uploadedImageUrl = await saveProductImage(
+            product.id,
+            normalizedImageBase64
+          );
+          finalProduct = await prisma.product.update({
+            where: { id: product.id },
+            data: { imageUrl: uploadedImageUrl },
+            include: {
+              tags: {
+                orderBy: { createdAt: "desc" },
+              },
+            },
+          });
+        } catch (error: any) {
+          console.error("Error al guardar imagen de producto:", error);
+          if (uploadedImageUrl) {
+            await removeUploadedFile(uploadedImageUrl);
+          }
+          await prisma.product.delete({ where: { id: product.id } }).catch(() => {});
+          const status =
+            (error as any)?.code === "IMAGE_VALIDATION_ERROR" ? 400 : 500;
+          return res.status(status).json({
+            error:
+              error?.message ||
+              "No pudimos guardar la imagen del producto. Intentá nuevamente.",
+          });
+        }
+      }
+
+      res.status(201).json({
+        product: serializeProduct(finalProduct),
+      });
+    } catch (error: any) {
+      console.error("Error en POST /api/products:", error);
+      res.status(500).json({
+        error: "No pudimos crear el producto.",
+      });
+    }
+  }
+);
+
+app.put(
+  "/api/products/:id",
+  authMiddleware,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const doctorId = req.doctorId!;
+      const productId = Number(req.params.id);
+      if (isNaN(productId)) {
+        return res.status(400).json({ error: "productId inválido" });
+      }
+
+      const product = await prisma.product.findFirst({
+        where: { id: productId, doctorId },
+      });
+
+      if (!product) {
+        return res.status(404).json({ error: "Producto no encontrado" });
+      }
+
+      const {
+        name,
+        description,
+        imageUrl,
+        imageBase64,
+        removeImage,
+        categories,
+        price,
+        quantity,
+      } = req.body as {
+        name?: string;
+        description?: string | null;
+        imageUrl?: string | null;
+        imageBase64?: string | null;
+        removeImage?: boolean | string;
+        categories?: unknown;
+        price?: number | string | null;
+        quantity?: number | string | null;
+      };
+
+      const data: Prisma.ProductUpdateInput = {};
+
+      if (name !== undefined) {
+        const sanitizedName = sanitizeProductName(name);
+        if (!sanitizedName) {
+          return res.status(400).json({
+            error: "El nombre del producto no puede estar vacío.",
+          });
+        }
+        data.name = sanitizedName;
+      }
+
+      if (description !== undefined) {
+        data.description = sanitizeOptionalText(description);
+      }
+
+      if (price !== undefined) {
+        const parsedPrice = parseNonNegativeInteger(price);
+        if (parsedPrice === null) {
+          return res.status(400).json({
+            error: "El precio debe ser un número válido.",
+          });
+        }
+        data.price = parsedPrice;
+      }
+
+      if (quantity !== undefined) {
+        const parsedQuantity = parseNonNegativeInteger(quantity);
+        if (parsedQuantity === null) {
+          return res.status(400).json({
+            error: "La cantidad debe ser un número válido.",
+          });
+        }
+        data.quantity = parsedQuantity;
+      }
+
+      if (categories !== undefined) {
+        data.categories = sanitizeProductCategories(categories);
+      }
+
+      const normalizedImageBase64 =
+        typeof imageBase64 === "string" && imageBase64.trim().length > 0
+          ? imageBase64.trim()
+          : null;
+      const shouldRemoveImage =
+        typeof removeImage === "string"
+          ? removeImage === "true"
+          : Boolean(removeImage);
+
+      let uploadedImageUrl: string | null = null;
+      if (normalizedImageBase64) {
+        try {
+          uploadedImageUrl = await saveProductImage(
+            product.id,
+            normalizedImageBase64
+          );
+        } catch (error: any) {
+          const status =
+            (error as any)?.code === "IMAGE_VALIDATION_ERROR" ? 400 : 500;
+          return res.status(status).json({
+            error:
+              error?.message ||
+              "No pudimos guardar la imagen del producto. Intentá nuevamente.",
+          });
+        }
+      }
+
+      if (uploadedImageUrl) {
+        data.imageUrl = uploadedImageUrl;
+      } else if (shouldRemoveImage) {
+        data.imageUrl = null;
+      } else if (imageUrl !== undefined) {
+        data.imageUrl = sanitizeOptionalText(imageUrl, 500);
+      }
+
+      let updated;
+      try {
+        updated = await prisma.product.update({
+          where: { id: product.id },
+          data,
+          include: {
+            tags: {
+              orderBy: { createdAt: "desc" },
+            },
+          },
+        });
+      } catch (updateError) {
+        if (uploadedImageUrl) {
+          await removeUploadedFile(uploadedImageUrl).catch(() => {});
+        }
+        throw updateError;
+      }
+
+      if (uploadedImageUrl && product.imageUrl) {
+        await removeUploadedFile(product.imageUrl);
+      } else if (shouldRemoveImage && product.imageUrl && !uploadedImageUrl) {
+        await removeUploadedFile(product.imageUrl);
+      }
+
+      res.json({
+        product: serializeProduct(updated),
+      });
+    } catch (error: any) {
+      console.error("Error en PUT /api/products/:id:", error);
+      res.status(500).json({
+        error: "No pudimos actualizar el producto.",
+      });
+    }
+  }
+);
+
+app.delete(
+  "/api/products/:id",
+  authMiddleware,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const doctorId = req.doctorId!;
+      const productId = Number(req.params.id);
+      if (isNaN(productId)) {
+        return res.status(400).json({ error: "productId inválido" });
+      }
+
+      const product = await prisma.product.findFirst({
+        where: { id: productId, doctorId },
+      });
+
+      if (!product) {
+        return res.status(404).json({ error: "Producto no encontrado" });
+      }
+
+      await prisma.product.delete({
+        where: { id: product.id },
+      });
+
+      await removeUploadedFile(product.imageUrl);
+
+      res.json({ ok: true });
+    } catch (error: any) {
+      console.error("Error en DELETE /api/products/:id:", error);
+      res.status(500).json({
+        error: "No pudimos eliminar el producto.",
+      });
+    }
+  }
+);
+
+app.post(
+  "/api/products/:id/tags",
+  authMiddleware,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const doctorId = req.doctorId!;
+      const productId = Number(req.params.id);
+      if (isNaN(productId)) {
+        return res.status(400).json({ error: "productId inválido" });
+      }
+
+      const product = await prisma.product.findFirst({
+        where: { id: productId, doctorId },
+      });
+
+      if (!product) {
+        return res.status(404).json({ error: "Producto no encontrado" });
+      }
+
+      const { label, severity } = req.body as {
+        label?: string;
+        severity?: string;
+      };
+
+      const sanitizedLabel = sanitizePatientTagLabel(label);
+      if (!sanitizedLabel) {
+        return res.status(400).json({
+          error: "Ingresá al menos 2 caracteres.",
+        });
+      }
+
+      const normalizedSeverity = normalizePatientTagSeverity(severity);
+
+      const tag = await prisma.productTag.create({
+        data: {
+          doctorId,
+          productId: product.id,
+          label: sanitizedLabel,
+          severity: normalizedSeverity,
+        },
+      });
+
+      res.status(201).json({
+        tag: serializeProductTagRecord(tag),
+      });
+    } catch (error: any) {
+      console.error("Error en POST /api/products/:id/tags:", error);
+      res.status(500).json({
+        error: "No pudimos guardar la etiqueta.",
+      });
+    }
+  }
+);
+
+app.post(
+  "/api/automation/retail",
+  authMiddleware,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+      if (!doctor || doctor.businessType !== "RETAIL") {
+        return res
+          .status(403)
+          .json({ error: "Automatización disponible solo para comercios." });
+      }
+
+      const { text } = req.body as { text?: string };
+      const trimmed = (text || "").trim();
+      if (!trimmed) {
+        return res.status(400).json({ error: "Mandá el texto a interpretar." });
+      }
+
+      const products = await prisma.product.findMany({
+        where: { doctorId },
+        select: {
+          id: true,
+          name: true,
+          price: true,
+          quantity: true,
+          categories: true,
+        },
+        orderBy: { updatedAt: "desc" },
+        take: 120,
+      });
+
+      const now = new Date();
+      const outstandingOrders = await prisma.order.findMany({
+        where: {
+          doctorId,
+          paymentStatus: { in: ["unpaid", "partial"] },
+        },
+        select: {
+          id: true,
+          sequenceNumber: true,
+          totalAmount: true,
+          paidAmount: true,
+          paymentStatus: true,
+          createdAt: true,
+          client: { select: { fullName: true } },
+        },
+        orderBy: { createdAt: "desc" },
+        take: 50,
+      });
+
+      const pendingOrders = await prisma.order.findMany({
+        where: { doctorId, status: "pending" },
+        select: {
+          id: true,
+          sequenceNumber: true,
+          client: { select: { fullName: true } },
+          items: {
+            select: {
+              quantity: true,
+              product: { select: { name: true } },
+            },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+        take: 20,
+      });
+
+      const agentResult = await runRetailAutomationAgent(
+        {
+          text: trimmed,
+          products,
+          outstandingOrders: outstandingOrders.map((o) => ({
+            id: o.id,
+            sequenceNumber: o.sequenceNumber,
+            clientName: o.client?.fullName ?? null,
+            totalAmount: o.totalAmount,
+            paidAmount: o.paidAmount ?? 0,
+            paymentStatus: o.paymentStatus,
+            daysOpen: Math.max(
+              0,
+              Math.round((now.getTime() - o.createdAt.getTime()) / (1000 * 60 * 60 * 24))
+            ),
+          })),
+          pendingOrders: pendingOrders.map((o) => ({
+            id: o.id,
+            sequenceNumber: o.sequenceNumber,
+            clientName: o.client?.fullName ?? null,
+            items: o.items.map((it) => ({
+              name: it.product?.name ?? "Producto",
+              quantity: it.quantity,
+            })),
+          })),
+        },
+        automationOpenAIClient
+      );
+
+      if (!agentResult) {
+        return res.status(500).json({
+          error: "No pude generar un plan de automatización.",
+        });
+      }
+
+      return res.json(agentResult);
+    } catch (error: any) {
+      console.error("Error en POST /api/automation/retail:", error);
+      res.status(500).json({
+        error: "No pudimos procesar la automatización.",
+      });
+    }
+  }
+);
+
+/**
+ * Comercio: pedidos
+ */
+app.get(
+  "/api/commerce/orders",
+  authMiddleware,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+      if (!doctor || doctor.businessType !== "RETAIL") {
+        return res.status(403).json({ error: "Sección disponible solo para comercios." });
+      }
+      const orders = await prisma.order.findMany({
+        where: { doctorId },
+        orderBy: { createdAt: "desc" },
+        include: {
+          client: true,
+          items: {
+            include: { product: true },
+          },
+          attachments: true,
+        },
+      });
+      res.json({
+        orders: orders.map(serializeOrderRecord),
+      });
+    } catch (error) {
+      console.error("Error en GET /api/commerce/orders:", error);
+      res.status(500).json({ error: "No pudimos obtener los pedidos." });
+    }
+  }
+);
+
+app.get(
+  "/api/commerce/attachments",
+  authMiddleware,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+      if (!doctor || doctor.businessType !== "RETAIL") {
+        return res.status(403).json({ error: "Sección disponible solo para comercios." });
+      }
+
+      const search = (req.query.q as string | undefined)?.trim().toLowerCase();
+      const searchNumber = search && /^\d+$/.test(search) ? Number(search) : null;
+
+      const attachments = await prisma.orderAttachment.findMany({
+        where: {
+          order: {
+            doctorId,
+            ...(search
+              ? {
+                  OR: [
+                    { customerName: { contains: search, mode: "insensitive" } },
+                    ...(searchNumber ? [{ sequenceNumber: searchNumber }] : []),
+                  ],
+                }
+              : {}),
+          },
+        },
+        include: {
+          order: {
+            select: {
+              id: true,
+              sequenceNumber: true,
+              customerName: true,
+              clientId: true,
+              createdAt: true,
+            },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+        take: 300,
+      });
+
+      res.json({
+        attachments: attachments.map((att) => ({
+          id: att.id,
+          orderId: att.orderId,
+          orderSequenceNumber: att.order.sequenceNumber,
+          customerName: att.order.customerName,
+          clientId: att.order.clientId,
+          url: att.url,
+          filename: att.filename,
+          mimeType: att.mimeType,
+          createdAt: att.createdAt,
+          orderCreatedAt: att.order.createdAt,
+        })),
+      });
+    } catch (error) {
+      console.error("Error en GET /api/commerce/attachments:", error);
+      res.status(500).json({ error: "No pudimos obtener los comprobantes." });
+    }
+  }
+);
+
+app.post(
+  "/api/commerce/orders/:id/payment-reminder",
+  authMiddleware,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true, whatsappBusinessNumber: true },
+      });
+      if (!doctor || doctor.businessType !== "RETAIL") {
+        return res.status(403).json({ error: "Sección disponible solo para comercios." });
+      }
+
+      const orderId = Number(req.params.id);
+      if (!Number.isFinite(orderId)) {
+        return res.status(400).json({ error: "orderId inválido" });
+      }
+
+      const order = await prisma.order.findFirst({
+        where: { id: orderId, doctorId },
+        include: { items: true, client: true },
+      });
+
+      if (!order) {
+        return res.status(404).json({ error: "Pedido no encontrado" });
+      }
+
+      if (!order.client?.phone) {
+        return res.status(400).json({ error: "El cliente no tiene teléfono para notificar." });
+      }
+
+      if (!doctor.whatsappBusinessNumber) {
+        return res
+          .status(400)
+          .json({ error: "Configurá un número de WhatsApp para enviar recordatorios." });
+      }
+
+      const pendingAmount = Math.max(0, order.totalAmount - (order.paidAmount || 0));
+      const message = `Registramos una deuda hasta la fecha de $${pendingAmount} por tu pedido #${order.sequenceNumber}.`;
+
+      try {
+        await sendWhatsAppText(order.client.phone, message, {
+          from: doctor.whatsappBusinessNumber,
+        });
+      } catch (err: any) {
+        console.error("Error enviando recordatorio de pago:", err);
+        return res
+          .status(500)
+          .json({ error: "No pudimos enviar el recordatorio. Verificá el número." });
+      }
+
+      return res.json({ ok: true });
+    } catch (error) {
+      console.error("Error en POST /api/commerce/orders/:id/payment-reminder:", error);
+      res.status(500).json({ error: "No pudimos enviar el recordatorio." });
+    }
+  }
+);
+
+const addDaysSafe = (date: Date, days: number) => {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
+};
+
+app.get(
+  "/api/commerce/promotions",
+  authMiddleware,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+      if (!doctor || doctor.businessType !== "RETAIL") {
+        return res.status(403).json({ error: "Sección disponible solo para comercios." });
+      }
+
+      const promotions = await prisma.promotion.findMany({
+        where: { doctorId },
+        orderBy: { createdAt: "desc" },
+      });
+
+      return res.json({ promotions });
+    } catch (error) {
+      console.error("Error en GET /api/commerce/promotions:", error);
+      res.status(500).json({ error: "No pudimos obtener las promociones." });
+    }
+  }
+);
+
+app.post(
+  "/api/commerce/promotions",
+  authMiddleware,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+      if (!doctor || doctor.businessType !== "RETAIL") {
+        return res.status(403).json({ error: "Sección disponible solo para comercios." });
+      }
+
+      const {
+        title,
+        description,
+        discountType,
+        discountValue,
+        productIds,
+        productTagLabels,
+        imageBase64,
+        durationDays,
+        untilStockOut,
+      } = req.body as {
+        title?: string;
+        description?: string | null;
+        discountType?: string;
+        discountValue?: number;
+        productIds?: number[];
+        productTagLabels?: string[];
+        imageBase64?: string | null;
+        durationDays?: number | null;
+        untilStockOut?: boolean;
+      };
+
+      const trimmedTitle = (title || "").trim();
+      if (!trimmedTitle) {
+        return res.status(400).json({ error: "Poné un título para la promo." });
+      }
+      const normalizedDiscountType =
+        discountType === "percent" || discountType === "amount" ? discountType : "amount";
+      const numericDiscount = Number(discountValue ?? 0);
+      if (!Number.isFinite(numericDiscount) || numericDiscount <= 0) {
+        return res.status(400).json({ error: "El descuento debe ser mayor a 0." });
+      }
+
+      const productIdsClean = Array.isArray(productIds)
+        ? productIds
+            .map((id) => Number(id))
+            .filter((id) => Number.isFinite(id) && id > 0)
+        : [];
+      const tagLabelsClean = Array.isArray(productTagLabels)
+        ? productTagLabels
+            .map((t) => (typeof t === "string" ? t.trim() : ""))
+            .filter((t) => t.length > 0)
+        : [];
+      const durationClean =
+        typeof durationDays === "number" && durationDays > 0
+          ? Math.round(durationDays)
+          : null;
+
+      let endDate: Date | null = null;
+      if (durationClean && durationClean > 0) {
+        endDate = addDaysSafe(new Date(), durationClean);
+      }
+
+      let savedImageUrl: string | null = null;
+      if (typeof imageBase64 === "string" && imageBase64.trim()) {
+        savedImageUrl = await savePromotionImage(doctorId, imageBase64.trim());
+      }
+
+      const created = await prisma.promotion.create({
+        data: {
+          doctorId,
+          title: trimmedTitle.slice(0, 180),
+          description: description?.trim() || null,
+          discountType: normalizedDiscountType,
+          discountValue: Math.round(numericDiscount),
+          productIds: productIdsClean,
+          productTagLabels: tagLabelsClean,
+          imageUrl: savedImageUrl,
+          durationDays: durationClean,
+          untilStockOut: Boolean(untilStockOut),
+          endDate,
+        },
+      });
+
+      return res.json({ promotion: created });
+    } catch (error) {
+      console.error("Error en POST /api/commerce/promotions:", error);
+      res.status(500).json({ error: "No pudimos crear la promoción." });
+    }
+  }
+);
+
+app.post(
+  "/api/commerce/promotions/:id/send",
+  authMiddleware,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true, whatsappBusinessNumber: true },
+      });
+      if (!doctor || doctor.businessType !== "RETAIL") {
+        return res.status(403).json({ error: "Sección disponible solo para comercios." });
+      }
+
+      const promotionId = Number(req.params.id);
+      if (!Number.isFinite(promotionId)) {
+        return res.status(400).json({ error: "ID de promoción inválido." });
+      }
+
+      const messageRaw = (req.body?.message || "").toString().trim();
+      if (!messageRaw) {
+        return res.status(400).json({ error: "Escribí el mensaje a enviar." });
+      }
+
+      const promotion = await prisma.promotion.findFirst({
+        where: { id: promotionId, doctorId },
+      });
+      if (!promotion) {
+        return res.status(404).json({ error: "Promoción no encontrada." });
+      }
+
+      if (!doctor.whatsappBusinessNumber) {
+        return res.status(400).json({
+          error: "Configurá un número de WhatsApp para enviar la promoción.",
+        });
+      }
+
+      const clients = await prisma.retailClient.findMany({
+        where: { doctorId, phone: { not: null } },
+        select: { id: true, phone: true },
+      });
+
+      if (!clients.length) {
+        return res.status(400).json({ error: "No hay clientes con teléfono para enviar." });
+      }
+
+      let sent = 0;
+      const mediaUrlRaw = buildPublicUrlFromRequest(promotion.imageUrl, req);
+      const mediaUrl = isLikelyPublicUrl(mediaUrlRaw) ? mediaUrlRaw : undefined;
+      for (const client of clients) {
+        if (!client.phone) continue;
+        try {
+          await sendWhatsAppText(
+            client.phone,
+            messageRaw,
+            {
+              from: doctor.whatsappBusinessNumber,
+            },
+            mediaUrl
+          );
+          sent += 1;
+        } catch (err) {
+          console.warn("[Promotion send] Error enviando a cliente", client.id, err);
+        }
+      }
+
+      return res.json({ ok: true, sent });
+    } catch (error) {
+      console.error("Error en POST /api/commerce/promotions/:id/send:", error);
+      res.status(500).json({ error: "No pudimos enviar la promoción." });
+    }
+  }
+);
+
+app.delete(
+  "/api/commerce/promotions/:id",
+  authMiddleware,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+      if (!doctor || doctor.businessType !== "RETAIL") {
+        return res.status(403).json({ error: "Sección disponible solo para comercios." });
+      }
+
+      const promotionId = Number(req.params.id);
+      if (!Number.isFinite(promotionId)) {
+        return res.status(400).json({ error: "ID de promoción inválido." });
+      }
+
+      const promo = await prisma.promotion.findFirst({
+        where: { id: promotionId, doctorId },
+      });
+      if (!promo) {
+        return res.status(404).json({ error: "Promoción no encontrada." });
+      }
+
+      await prisma.promotion.delete({
+        where: { id: promotionId },
+      });
+
+      return res.json({ ok: true });
+    } catch (error) {
+      console.error("Error en DELETE /api/commerce/promotions/:id:", error);
+      res.status(500).json({ error: "No pudimos eliminar la promoción." });
+    }
+  }
+);
+
+app.post(
+  "/api/commerce/orders",
+  authMiddleware,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+      if (!doctor || doctor.businessType !== "RETAIL") {
+        return res.status(403).json({ error: "Sección disponible solo para comercios." });
+      }
+      const {
+        items,
+        client,
+      } = req.body as {
+        items?: Array<{ productId?: number; quantity?: number }>;
+        client?: {
+          fullName?: string;
+          phone?: string | null;
+          dni?: string | null;
+          address?: string | null;
+          retailClientId?: number | null;
+        };
+      };
+
+      if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ error: "No hay items en el pedido." });
+      }
+
+      const normalizedItems = items
+        .map((it) => ({
+          productId: Number(it.productId),
+          quantity: Number(it.quantity),
+        }))
+        .filter((it) => Number.isFinite(it.productId) && it.quantity > 0);
+
+      if (normalizedItems.length === 0) {
+        return res
+          .status(400)
+          .json({ error: "Los items del pedido no son válidos." });
+      }
+
+      const productIds = normalizedItems.map((i) => i.productId);
+      const products = await prisma.product.findMany({
+        where: { id: { in: productIds }, doctorId },
+      });
+
+      if (products.length !== productIds.length) {
+        return res
+          .status(400)
+          .json({ error: "Algunos productos no existen o no pertenecen al negocio." });
+      }
+
+      const stockIssues: string[] = [];
+      normalizedItems.forEach((item) => {
+        const product = products.find((p) => p.id === item.productId)!;
+        if (product.quantity < item.quantity) {
+          stockIssues.push(product.name);
+        }
+      });
+
+      if (stockIssues.length > 0) {
+        return res.status(409).json({
+          error: `Sin stock suficiente: ${stockIssues.join(", ")}`,
+        });
+      }
+
+      const totalAmount = normalizedItems.reduce((acc, item) => {
+        const product = products.find((p) => p.id === item.productId)!;
+        return acc + product.price * item.quantity;
+      }, 0);
+
+      let linkedClientId: number | null = null;
+      if (client?.retailClientId) {
+        const rc = await prisma.retailClient.findFirst({
+          where: { id: client.retailClientId, doctorId },
+        });
+        linkedClientId = rc?.id ?? null;
+      } else if (client?.fullName) {
+        const created = await prisma.retailClient.create({
+          data: {
+            doctorId,
+            fullName: client.fullName,
+            phone: client.phone || null,
+            dni: client.dni || null,
+            businessAddress: client.address || null,
+          },
+        });
+        linkedClientId = created.id;
+      }
+
+      const last = await prisma.order.findFirst({
+        where: { doctorId },
+        orderBy: { sequenceNumber: "desc" },
+        select: { sequenceNumber: true },
+      });
+      const nextSequence = (last?.sequenceNumber || 0) + 1;
+
+      const createdOrder = await prisma.order.create({
+        data: {
+          doctorId,
+          sequenceNumber: nextSequence,
+          status: "pending",
+          totalAmount,
+          customerName: client?.fullName || "Cliente WhatsApp",
+          customerAddress: client?.address || null,
+          customerDni: client?.dni || null,
+          clientId: linkedClientId,
+          items: {
+            create: normalizedItems.map((item) => ({
+              productId: item.productId,
+              quantity: item.quantity,
+              unitPrice: products.find((p) => p.id === item.productId)!.price,
+            })),
+          },
+        },
+        include: {
+          items: { include: { product: true } },
+          attachments: true,
+        },
+      });
+
+      return res.status(201).json({
+        order: serializeOrderRecord(createdOrder),
+      });
+    } catch (error) {
+      console.error("Error en POST /api/commerce/orders:", error);
+      res.status(500).json({ error: "No pudimos crear el pedido." });
+    }
+  }
+);
+
+app.patch(
+  "/api/commerce/orders/:id",
+  authMiddleware,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+      if (!doctor || doctor.businessType !== "RETAIL") {
+        return res.status(403).json({ error: "Sección disponible solo para comercios." });
+      }
+      const orderId = Number(req.params.id);
+      const {
+        items,
+        status,
+        paymentStatus,
+        paidAmount,
+      } = req.body as {
+        items?: Array<{ productId?: number; quantity?: number }>;
+        status?: "pending" | "confirmed" | "cancelled";
+        paymentStatus?: string;
+        paidAmount?: number;
+      };
+
+      if (!Number.isFinite(orderId)) {
+        return res.status(400).json({ error: "orderId inválido" });
+      }
+
+      const order = await prisma.order.findFirst({
+        where: { id: orderId, doctorId },
+        include: { items: true },
+      });
+
+      if (!order) {
+        return res.status(404).json({ error: "Pedido no encontrado" });
+      }
+
+      const wantsEditItems = Array.isArray(items) && items.length > 0;
+      if (wantsEditItems && order.status !== "pending") {
+        return res
+          .status(400)
+          .json({ error: "Solo se pueden editar pedidos en revisión." });
+      }
+
+      if (order.inventoryDeducted && Array.isArray(items) && items.length > 0) {
+        return res
+          .status(400)
+          .json({ error: "El stock ya fue descontado; no se pueden editar ítems en este estado." });
+      }
+
+      let updateData: Prisma.OrderUpdateInput = {};
+
+      if (status && ["pending", "confirmed", "cancelled"].includes(status)) {
+        updateData.status = status;
+      }
+
+      const normalizedPaidAmount =
+        paidAmount === undefined || paidAmount === null ? undefined : Math.max(0, Number(paidAmount));
+      const normalizedPaymentStatus =
+        paymentStatus && ["unpaid", "paid", "partial"].includes(paymentStatus)
+          ? paymentStatus
+          : undefined;
+
+      if (normalizedPaidAmount !== undefined) {
+        updateData.paidAmount = normalizedPaidAmount;
+      }
+      if (normalizedPaymentStatus) {
+        updateData.paymentStatus = normalizedPaymentStatus;
+      } else if (normalizedPaidAmount !== undefined) {
+        if (normalizedPaidAmount === 0) {
+          updateData.paymentStatus = "unpaid";
+        } else if (normalizedPaidAmount >= order.totalAmount) {
+          updateData.paymentStatus = "paid";
+        } else {
+          updateData.paymentStatus = "partial";
+        }
+      }
+
+      if (Array.isArray(items) && items.length > 0) {
+        const normalizedItems = items
+          .map((it) => ({
+            productId: Number(it.productId),
+            quantity: Number(it.quantity),
+          }))
+          .filter((it) => Number.isFinite(it.productId) && it.quantity > 0);
+
+        if (normalizedItems.length === 0) {
+          return res
+            .status(400)
+            .json({ error: "Los items del pedido no son válidos." });
+        }
+
+        const productIds = normalizedItems.map((i) => i.productId);
+        const products = await prisma.product.findMany({
+          where: { id: { in: productIds }, doctorId },
+        });
+
+        if (products.length !== productIds.length) {
+          return res
+            .status(400)
+            .json({ error: "Algunos productos no existen o no pertenecen al negocio." });
+        }
+
+        const stockIssues: string[] = [];
+        normalizedItems.forEach((item) => {
+          const product = products.find((p) => p.id === item.productId)!;
+          if (product.quantity < item.quantity) {
+            stockIssues.push(product.name);
+          }
+        });
+
+        if (stockIssues.length > 0) {
+          return res.status(409).json({
+            error: `Sin stock suficiente: ${stockIssues.join(", ")}`,
+          });
+        }
+
+        const totalAmount = normalizedItems.reduce((acc, item) => {
+          const product = products.find((p) => p.id === item.productId)!;
+          return acc + product.price * item.quantity;
+        }, 0);
+
+        await prisma.$transaction([
+          prisma.orderItem.deleteMany({ where: { orderId: order.id } }),
+          prisma.order.update({
+            where: { id: order.id },
+            data: {
+              ...updateData,
+              totalAmount,
+              items: {
+                create: normalizedItems.map((item) => ({
+                  productId: item.productId,
+                  quantity: item.quantity,
+                  unitPrice: products.find((p) => p.id === item.productId)!.price,
+                })),
+              },
+            },
+          }),
+        ]);
+      } else if (Object.keys(updateData).length > 0) {
+        await prisma.order.update({
+          where: { id: order.id },
+          data: updateData,
+        });
+      }
+
+      const updated = await prisma.order.findUnique({
+        where: { id: order.id },
+        include: { items: { include: { product: true } }, attachments: true },
+      });
+
+      res.json({
+        order: updated ? serializeOrderRecord(updated) : null,
+      });
+    } catch (error) {
+      console.error("Error en PATCH /api/commerce/orders/:id:", error);
+      res.status(500).json({ error: "No pudimos actualizar el pedido." });
+    }
+  }
+);
+
+app.post(
+  "/api/commerce/orders/:id/attachments",
+  authMiddleware,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+      if (!doctor || doctor.businessType !== "RETAIL") {
+        return res.status(403).json({ error: "Sección disponible solo para comercios." });
+      }
+
+      const orderId = Number(req.params.id);
+      if (!Number.isFinite(orderId)) {
+        return res.status(400).json({ error: "orderId inválido" });
+      }
+
+      const { fileBase64, filename } = req.body as {
+        fileBase64?: string;
+        filename?: string | null;
+      };
+
+      if (!fileBase64 || typeof fileBase64 !== "string") {
+        return res.status(400).json({ error: "Falta el archivo a subir." });
+      }
+
+      const order = await prisma.order.findFirst({
+        where: { id: orderId, doctorId },
+      });
+      if (!order) {
+        return res.status(404).json({ error: "Pedido no encontrado" });
+      }
+
+      let saved;
+      try {
+        saved = await saveOrderAttachmentFile(orderId, fileBase64, filename);
+      } catch (error: any) {
+        if (typeof error?.message === "string" && error?.code === "IMAGE_VALIDATION_ERROR") {
+          return res.status(400).json({ error: error.message });
+        }
+        throw error;
+      }
+
+      const attachment = await prisma.orderAttachment.create({
+        data: {
+          orderId,
+          url: saved.url,
+          filename: saved.filename,
+          mimeType: saved.mime,
+        },
+      });
+
+      return res.status(201).json({
+        attachment: {
+          id: attachment.id,
+          url: attachment.url,
+          filename: attachment.filename,
+          mimeType: attachment.mimeType,
+          createdAt: attachment.createdAt,
+        },
+      });
+    } catch (error) {
+      console.error("Error en POST /api/commerce/orders/:id/attachments:", error);
+      res.status(500).json({ error: "No pudimos subir el comprobante." });
+    }
+  }
+);
+
+app.delete(
+  "/api/commerce/orders/:id",
+  authMiddleware,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+      if (!doctor || doctor.businessType !== "RETAIL") {
+        return res.status(403).json({ error: "Sección disponible solo para comercios." });
+      }
+      const orderId = Number(req.params.id);
+      if (!Number.isFinite(orderId)) {
+        return res.status(400).json({ error: "orderId inválido" });
+      }
+
+      const order = await prisma.order.findFirst({
+        where: { id: orderId, doctorId },
+      });
+      if (!order) {
+        return res.status(404).json({ error: "Pedido no encontrado" });
+      }
+
+      const attachments = await prisma.orderAttachment.findMany({
+        where: { orderId },
+      });
+
+      await prisma.$transaction([
+        prisma.orderItem.deleteMany({ where: { orderId } }),
+        prisma.orderAttachment.deleteMany({ where: { orderId } }),
+        prisma.order.delete({ where: { id: orderId } }),
+      ]);
+
+      await Promise.all(
+        attachments.map((att) => removeUploadedFile(att.url).catch(() => {}))
+      );
+      return res.json({ ok: true });
+    } catch (error) {
+      console.error("Error en DELETE /api/commerce/orders/:id:", error);
+      res.status(500).json({ error: "No pudimos eliminar el pedido." });
+    }
+  }
+);
+
+app.delete(
+  "/api/products/:id/tags/:tagId",
+  authMiddleware,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const doctorId = req.doctorId!;
+      const productId = Number(req.params.id);
+      const tagId = Number(req.params.tagId);
+      if (isNaN(productId) || isNaN(tagId)) {
+        return res.status(400).json({ error: "Parámetros inválidos" });
+      }
+
+      const tag = await prisma.productTag.findFirst({
+        where: { id: tagId, productId, doctorId },
+      });
+
+      if (!tag) {
+        return res.status(404).json({ error: "Etiqueta no encontrada" });
+      }
+
+      await prisma.productTag.delete({
+        where: { id: tag.id },
+      });
+
+      res.json({ ok: true });
+    } catch (error: any) {
+      console.error("Error en DELETE /api/products/:id/tags/:tagId:", error);
+      res.status(500).json({
+        error: "No pudimos eliminar la etiqueta.",
       });
     }
   }
@@ -4668,9 +7289,30 @@ app.get(
   async (req: AuthRequest, res: Response) => {
     try {
       const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+      if (!doctor) {
+        return res.status(404).json({ error: "Doctor no encontrado" });
+      }
       const patientId = Number(req.params.id);
       if (isNaN(patientId)) {
         return res.status(400).json({ error: "patientId inválido" });
+      }
+
+      if (doctor.businessType === "RETAIL") {
+        const client = await prisma.retailClient.findFirst({
+          where: { id: patientId, doctorId },
+        });
+        if (!client) {
+          return res.status(404).json({ error: "Cliente no encontrado" });
+        }
+        const messages = await prisma.message.findMany({
+          where: { retailClientId: client.id, doctorId },
+          orderBy: { createdAt: "asc" },
+        });
+        return res.json({ messages });
       }
 
       const patient = await prisma.patient.findFirst({
@@ -4702,10 +7344,62 @@ app.get(
   async (req: AuthRequest, res: Response) => {
     try {
       const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+      if (!doctor) {
+        return res.status(404).json({ error: "Doctor no encontrado" });
+      }
       const now = new Date();
       const appointmentRecentThreshold = new Date(
         now.getTime() - 1000 * 60 * 60 * 24 * 2
       );
+
+      if (doctor.businessType === "RETAIL") {
+        const recentOrderThreshold = new Date(now.getTime() - 1000 * 60 * 60 * 24 * 3);
+        const recentClientThreshold = new Date(now.getTime() - 1000 * 60 * 60 * 24 * 7);
+
+        const [newOrders, newClients] = await Promise.all([
+          prisma.order.findMany({
+            where: {
+              doctorId,
+              status: "pending",
+              createdAt: { gte: recentOrderThreshold },
+            },
+            orderBy: { createdAt: "desc" },
+            take: 25,
+          }),
+          prisma.retailClient.findMany({
+            where: {
+              doctorId,
+              createdAt: { gte: recentClientThreshold },
+            },
+            orderBy: { createdAt: "desc" },
+            take: 25,
+          }),
+        ]);
+
+        return res.json({
+          documents: [],
+          newAppointments: [],
+          incompletePatients: [],
+          newOrders: newOrders.map((order) => ({
+            id: order.id,
+            sequenceNumber: order.sequenceNumber,
+            customerName: order.customerName,
+            totalAmount: order.totalAmount,
+            createdAt: order.createdAt.toISOString(),
+          })),
+          newClients: newClients.map((c) => ({
+            id: c.id,
+            fullName: c.fullName,
+            phone: c.phone,
+            createdAt: c.createdAt.toISOString(),
+          })),
+          overdueOrders: [],
+        });
+      }
 
       const [documents, newAppointments, incompletePatients] = await Promise.all([
         prisma.patientDocument.findMany({
@@ -5333,9 +8027,11 @@ app.post(
       const {
         displayPhoneNumber,
         status,
+        businessType,
       } = req.body as {
         displayPhoneNumber?: string;
         status?: "available" | "reserved" | "assigned";
+        businessType?: BusinessType;
       };
 
       if (!displayPhoneNumber) {
@@ -5351,6 +8047,9 @@ app.post(
           ? "reserved"
           : "available";
 
+      const normalizedBusinessType: BusinessType =
+        businessType === "RETAIL" ? "RETAIL" : "HEALTH";
+
       const normalizedNumber = normalizeWhatsappSender(displayPhoneNumber);
 
       const number = await prisma.whatsAppNumber.upsert({
@@ -5358,6 +8057,7 @@ app.post(
         update: {
           displayPhoneNumber: normalizedNumber,
           status: normalizedStatus,
+          businessType: normalizedBusinessType,
           ...(normalizedStatus === "available"
             ? { assignedDoctorId: null }
             : {}),
@@ -5365,6 +8065,7 @@ app.post(
         create: {
           displayPhoneNumber: normalizedNumber,
           status: normalizedStatus,
+          businessType: normalizedBusinessType,
         },
       });
 

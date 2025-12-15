@@ -27,7 +27,19 @@ export type AgentToolAction =
       reply: string;
       reason?: string | null;
     } & AgentToolActionBase)
-  | ({ type: "ask_clarification"; reply: string } & AgentToolActionBase);
+  | ({ type: "ask_clarification"; reply: string } & AgentToolActionBase)
+  | ({
+      type: "retail_upsert_order";
+      reply: string;
+      items: Array<{ name: string; quantity: number }>;
+      status?: "pending" | "confirmed" | "cancelled";
+      mode?: "replace" | "merge";
+      clientInfo?: { fullName?: string; dni?: string; address?: string };
+    } & AgentToolActionBase)
+  | ({
+      type: "retail_cancel_order";
+      reply: string;
+    } & AgentToolActionBase);
 
 export type AgentExecutionResult = {
   replyToPatient: string;
@@ -76,7 +88,13 @@ export type AgentContextBase = {
     consultationPrice: number | null;
     emergencyConsultationPrice: number | null;
     additionalNotes: string | null;
+    slotMinutes?: number | null;
   };
+  pendingOrders?: Array<{
+    sequenceNumber: number;
+    status: string;
+    items: Array<{ name: string; quantity: number }>;
+  }>;
 };
 
 export type AgentRunner = (

@@ -1,8 +1,8 @@
 // src/components/AuthScreen.tsx
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { buildApiUrl } from "../config";
-
-type BusinessType = "HEALTH" | "BEAUTY" | "RETAIL";
+import { type BusinessType, getBusinessConfig } from "../businessConfig";
+import logoWhite from "../assets/logo-white.svg";
 
 type DoctorAvailabilityStatus = "available" | "unavailable" | "vacation";
 
@@ -26,11 +26,13 @@ type LoginResponse = {
   doctor: Doctor;
 };
 
+const NON_HEALTH_SPECIALTY_PLACEHOLDER = "General";
+
 export default function AuthScreen({ onAuthSuccess }: AuthScreenProps) {
   const [mode, setMode] = useState<AuthMode>("login");
   const [name, setName] = useState("");
-  const [email, setEmail] = useState("ana@example.com"); // dejo demo por comodidad
-  const [password, setPassword] = useState("demo1234");   // idem
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [contactPhone, setContactPhone] = useState("");
   const [gender, setGender] = useState("");
   const [specialty, setSpecialty] = useState("");
@@ -38,6 +40,22 @@ export default function AuthScreen({ onAuthSuccess }: AuthScreenProps) {
   const [registerStep, setRegisterStep] = useState<1 | 2>(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const businessConfig = getBusinessConfig(businessType);
+  const requiresSpecialty = businessConfig.register.requiresSpecialty;
+
+  useEffect(() => {
+    if (requiresSpecialty) {
+      setSpecialty((prev) =>
+        prev === NON_HEALTH_SPECIALTY_PLACEHOLDER ? "" : prev
+      );
+    } else {
+      setSpecialty((prev) =>
+        prev && prev !== NON_HEALTH_SPECIALTY_PLACEHOLDER
+          ? prev
+          : NON_HEALTH_SPECIALTY_PLACEHOLDER
+      );
+    }
+  }, [requiresSpecialty]);
 
   const handleModeChange = (nextMode: AuthMode) => {
     if (nextMode === mode) return;
@@ -60,14 +78,16 @@ export default function AuthScreen({ onAuthSuccess }: AuthScreenProps) {
       return;
     }
 
-  if (
-      mode === "register" &&
-      registerStep === 2 &&
-      (!contactPhone.trim() || !gender.trim() || !specialty.trim())
-    ) {
-      setError("Completá teléfono, sexo y especialidad para continuar.");
+  if (mode === "register" && registerStep === 2) {
+    if (!contactPhone.trim() || !gender.trim()) {
+      setError("Completá teléfono y sexo para continuar.");
       return;
     }
+    if (requiresSpecialty && !specialty.trim()) {
+      setError("Elegí tu especialidad para continuar.");
+      return;
+    }
+  }
 
     setLoading(true);
     setError(null);
@@ -115,13 +135,18 @@ export default function AuthScreen({ onAuthSuccess }: AuthScreenProps) {
   }
 
   return (
-    <div className="w-full max-w-md mx-auto">
+    <div className="w-full max-w-md mx-auto -mt-6 sm:-mt-10">
       <div className="mb-6 text-center">
-        <h1 className="text-2xl font-semibold text-slate-900">
-          Asistente Médico
-        </h1>
-        <p className="text-sm text-slate-500 mt-1">
-          Ingresá con tu cuenta de médico o creá una nueva.
+        <img
+          src={logoWhite}
+          alt="Nexova logo"
+          className="mx-auto w-56 sm:w-64 h-auto mb-2"
+        />
+        <p className="text-xs uppercase tracking-[0.2em] text-slate-400 mb-5 mt-5">
+          Smart connections, better business.
+        </p>
+        <p className="text-sm text-slate-500 mt-5">
+          Ingresá con tu cuenta o creá una nueva.
         </p>
       </div>
 
@@ -226,12 +251,6 @@ export default function AuthScreen({ onAuthSuccess }: AuthScreenProps) {
                   onChange={(e) => setPassword(e.target.value)}
                   required
                 />
-                {mode === "login" && (
-                  <p className="text-[11px] text-slate-400 mt-1">
-                    Demo rápida: <span className="font-mono">ana@example.com</span>{" "}
-                    / <span className="font-mono">demo1234</span>
-                  </p>
-                )}
               </div>
             </>
           ) : (
@@ -263,19 +282,6 @@ export default function AuthScreen({ onAuthSuccess }: AuthScreenProps) {
                   <option value="masculino">Masculino</option>
                   <option value="otro">Otro / Prefiero no decir</option>
                 </select>
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-xs font-medium text-slate-700">
-                  Especialidad
-                </label>
-                <input
-                  type="text"
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900/5"
-                  placeholder="Clínica médica, pediatría..."
-                  value={specialty}
-                  onChange={(e) => setSpecialty(e.target.value)}
-                />
               </div>
 
               <div className="space-y-1">
@@ -316,6 +322,37 @@ export default function AuthScreen({ onAuthSuccess }: AuthScreenProps) {
                   ))}
                 </div>
               </div>
+
+            {requiresSpecialty && (
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-slate-700">
+                    Especialidad
+                  </label>
+                  <select
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900/5 bg-white"
+                    value={specialty}
+                    onChange={(e) => setSpecialty(e.target.value)}
+                  >
+                    <option value="">Seleccioná una especialidad</option>
+                    {[
+                      "Doctor/a general",
+                      "Médico/a clínico/a",
+                      "Oftalmólogo/a",
+                      "Pediatra",
+                      "Cardiólogo/a",
+                      "Ginecólogo/a",
+                      "Dermatólogo/a",
+                      "Traumatólogo/a",
+                      "Kinesiólogo/a",
+                      "Otro",
+                    ].map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
             </>
           )}
 
@@ -351,11 +388,6 @@ export default function AuthScreen({ onAuthSuccess }: AuthScreenProps) {
           </div>
         </form>
       </div>
-
-      <p className="mt-3 text-[11px] text-slate-400 text-center">
-        Esta versión es solo de prueba. Más adelante vas a poder conectar tu
-        WhatsApp y tus calendarios reales.
-      </p>
     </div>
   );
 }

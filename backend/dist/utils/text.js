@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.normalizeInsuranceAnswer = normalizeInsuranceAnswer;
 exports.formatConsultReasonAnswer = formatConsultReasonAnswer;
+exports.normalizeDniInput = normalizeDniInput;
 function normalizeInsuranceAnswer(raw) {
     if (!raw)
         return null;
@@ -109,4 +110,14 @@ function sentenceCase(value) {
         return value;
     const lower = value.toLowerCase();
     return lower.charAt(0).toUpperCase() + lower.slice(1);
+}
+// Normaliza DNI: devuelve solo dígitos si tiene longitud esperable, sino null
+function normalizeDniInput(value) {
+    if (!value)
+        return null;
+    const digits = value.replace(/\D/g, "");
+    if (digits.length < 7 || digits.length > 10) {
+        return null;
+    }
+    return digits;
 }

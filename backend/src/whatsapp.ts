@@ -59,7 +59,8 @@ export async function checkTwilioConnectivity(): Promise<ServiceCheckResult> {
 export async function sendWhatsAppText(
   to: string,
   body: string,
-  credentials?: WhatsappCredentials
+  credentials?: WhatsappCredentials,
+  mediaUrl?: string
 ) {
   if (!TWILIO_API_URL || !TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
     throw new Error(
@@ -80,6 +81,9 @@ export async function sendWhatsAppText(
   params.set("To", normalizedTo);
   params.set("From", sender);
   params.set("Body", body);
+  if (mediaUrl) {
+    params.set("MediaUrl", mediaUrl);
+  }
 
   const response = await axios.post(TWILIO_API_URL, params.toString(), {
     headers: {
