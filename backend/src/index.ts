@@ -6891,9 +6891,27 @@ app.post(
       const finalBody = `${messageRaw}\n\n${promoBlock}`.trim();
 
       let sent = 0;
-      const mediaUrlRaw =
-        buildPublicUrl(promotion.imageUrl) || buildPublicUrlFromRequest(promotion.imageUrl, req);
-      const mediaUrl = mediaUrlRaw && isLikelyPublicUrl(mediaUrlRaw) ? mediaUrlRaw : undefined;
+      const mediaUrl = (() => {
+        if (!promotion.imageUrl) return undefined;
+        const path = promotion.imageUrl.startsWith("/")
+          ? promotion.imageUrl
+          : `/${promotion.imageUrl}`;
+        const envBase = (APP_BASE_URL || "").replace(/\/+$/, "");
+        const host = req.get("host") || "";
+        const hostBase = host ? `https://${host}` : "";
+        const candidates = [hostBase, envBase].filter(Boolean);
+        for (const base of candidates) {
+          if (!base) continue;
+          const url = `${base}${path}`;
+          if (
+            isLikelyPublicUrl(url) &&
+            !/localhost|127\.0\.0\.1/i.test(url)
+          ) {
+            return url;
+          }
+        }
+        return undefined;
+      })();
       for (const client of clients) {
         if (!client.phone) continue;
         try {

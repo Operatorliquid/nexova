@@ -2321,10 +2321,13 @@ const [automationMessages, setAutomationMessages] = useState<
     (order: CommerceOrder) => {
       if (typeof window === "undefined" || !order) return;
       const shopName = doctor?.name ? doctor.name : "Comercio";
-      const logoUrl =
-        doctor?.ticketLogoUrl && doctor.ticketLogoUrl.startsWith("/uploads/")
-          ? buildApiUrl(doctor.ticketLogoUrl)
-          : doctor?.ticketLogoUrl || null;
+      const logoUrl = (() => {
+        const raw = doctor?.ticketLogoUrl || null;
+        if (!raw) return null;
+        if (/^https?:\/\//i.test(raw)) return raw;
+        const normalized = raw.startsWith("/") ? raw : `/${raw}`;
+        return buildApiUrl(normalized);
+      })();
       const createdAt = new Date(order.createdAt);
       const dateLabel = createdAt.toLocaleDateString("es-AR", {
         day: "2-digit",
@@ -2433,7 +2436,6 @@ const [automationMessages, setAutomationMessages] = useState<
       printWindow.document.write(html);
       printWindow.document.close();
       printWindow.focus();
-      // Esperamos a que cargue el DOM/imagen antes de disparar print
       const safePrint = () => {
         try {
           printWindow.print();
@@ -2441,12 +2443,8 @@ const [automationMessages, setAutomationMessages] = useState<
           console.error("Error al imprimir:", err);
         }
       };
-      if ("onload" in printWindow) {
-        // Si soporta onload, esperamos el render
-        printWindow.onload = () => safePrint();
-      } else {
-        setTimeout(safePrint, 400);
-      }
+      // esperamos un poco para que carguen imágenes (logo)
+      setTimeout(safePrint, 800);
     },
     [doctor?.name, doctor?.ticketLogoUrl]
   );
