@@ -310,6 +310,19 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
 
   await maybeUpdateProfile();
 
+  // Si es un cliente nuevo y no tenemos datos mínimos, pedimos DNI y dirección antes de seguir
+  if (!client.dni || !client.businessAddress) {
+    const missing: string[] = [];
+    if (!client.dni) missing.push("DNI");
+    if (!client.businessAddress) missing.push("dirección de entrega");
+    await sendMessage(
+      `Para continuar necesito algunos datos: ${missing.join(
+        " y "
+      )}.\nEnviame algo así:\nDNI: 12345678\nDirección: Calle 123, piso/depto.`
+    );
+    return true;
+  }
+
   // Si piden cancelar, intentamos cancelar el pendiente más reciente
   if (action.type === "retail_cancel_order") {
     const pending = await prisma.order.findFirst({

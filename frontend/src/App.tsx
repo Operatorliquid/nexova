@@ -6677,6 +6677,7 @@ const automationAppointmentPool = useMemo(() => {
     async (raw: string) => {
       if (!token || businessType !== "RETAIL") return false;
       try {
+        setAutomationPendingActions(null);
         console.log("[automation] sending text to agent:", raw);
         const res = await fetch(buildApiUrl("/api/automation/retail"), {
           method: "POST",
@@ -12941,6 +12942,7 @@ return (
             activeSection !== "patients" &&
             activeSection !== "history" &&
             activeSection !== "agenda" &&
+            activeSection !== "stock" &&
             activeSection !== "orders" &&
             activeSection !== "debts" &&
             activeSection !== "promotions" &&
