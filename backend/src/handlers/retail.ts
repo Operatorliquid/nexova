@@ -820,6 +820,25 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
     await restockOrderInventory(target);
   }
 
+  const wantsEdit =
+    /\b(editar|cambiar|modificar|ajustar|actualizar)\b/i.test(rawText || "") &&
+    (!Array.isArray(action.items) || action.items.length === 0);
+  if (wantsEdit && pendingOrders.length > 0) {
+    const summary = pendingOrders
+      .slice(0, 3)
+      .map((o) => {
+        const itemsList =
+          o.items?.map((it) => `${it.quantity}x ${products.find((p) => p.id === it.productId)?.name || "Producto"}`).join(", ") ||
+          "sin ítems";
+        return `#${o.sequenceNumber} · ${itemsList}`;
+      })
+      .join("\n");
+    await sendMessage(
+      `Tengo estos pedidos en revisión:\n${summary}\nDecime qué producto querés sumar, quitar o cambiar y sobre cuál pedido (#).`
+    );
+    return true;
+  }
+
   // "sumar/agregar" => suma cantidades. Si no, setea la cantidad del producto mencionado.
   const addMode =
     action.mode === "merge" ||

@@ -645,6 +645,21 @@ async function handleRetailAgentAction(params) {
     if (target && target.inventoryDeducted) {
         await restockOrderInventory(target);
     }
+    const wantsEdit = /\b(editar|cambiar|modificar|ajustar|actualizar)\b/i.test(rawText || "") &&
+        (!Array.isArray(action.items) || action.items.length === 0);
+    if (wantsEdit && pendingOrders.length > 0) {
+        const summary = pendingOrders
+            .slice(0, 3)
+            .map((o) => {
+            var _a;
+            const itemsList = ((_a = o.items) === null || _a === void 0 ? void 0 : _a.map((it) => { var _a; return `${it.quantity}x ${((_a = products.find((p) => p.id === it.productId)) === null || _a === void 0 ? void 0 : _a.name) || "Producto"}`; }).join(", ")) ||
+                "sin ítems";
+            return `#${o.sequenceNumber} · ${itemsList}`;
+        })
+            .join("\n");
+        await sendMessage(`Tengo estos pedidos en revisión:\n${summary}\nDecime qué producto querés sumar, quitar o cambiar y sobre cuál pedido (#).`);
+        return true;
+    }
     // "sumar/agregar" => suma cantidades. Si no, setea la cantidad del producto mencionado.
     const addMode = action.mode === "merge" ||
         /\b(sum(ar|ame|á)|agreg(ar|ame|á|alas)|añad(ir|ime|í)|mas|\+)\b/i.test(rawText);

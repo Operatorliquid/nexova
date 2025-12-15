@@ -1759,6 +1759,8 @@ const handleProfileFieldChange = useCallback(
   }, [products]);
 
   const productTagOptionsRef = useRef<string[]>([]);
+  const [productTagOptionsVersion, setProductTagOptionsVersion] = useState(0);
+
   const productTagOptions = useMemo(() => {
     const set = new Set<string>(productTagOptionsRef.current);
     products.forEach((p) => {
@@ -1769,13 +1771,7 @@ const handleProfileFieldChange = useCallback(
     const arr = Array.from(set);
     productTagOptionsRef.current = arr;
     return arr;
-  }, [products]);
-
-  const promotionProductList = useMemo(() => {
-    const term = promotionProductSearch.trim().toLowerCase();
-    if (!term) return products;
-    return products.filter((p) => p.name.toLowerCase().includes(term));
-  }, [products, promotionProductSearch]);
+  }, [products, productTagOptionsVersion]);
 
   const [tagModalOpen, setTagModalOpen] = useState(false);
   const [tagModalPatientId, setTagModalPatientId] = useState<number | null>(
@@ -4208,6 +4204,8 @@ const automationAppointmentPool = useMemo(() => {
         productTagOptionsRef.current = Array.from(
           new Set([json.tag.label, ...productTagOptionsRef.current])
         );
+        // Forzamos re-render de las opciones
+        setProductTagOptionsVersion((v) => v + 1);
       }
       closeProductTagModal();
     } catch (err: any) {
@@ -12202,7 +12200,12 @@ return (
                                 No tenés productos cargados.
                               </p>
                             )}
-                            {promotionProductList.map((prod) => {
+                            {(promotionProductSearch.trim()
+                              ? products.filter((p) =>
+                                  p.name.toLowerCase().includes(promotionProductSearch.toLowerCase().trim())
+                                )
+                              : products
+                            ).map((prod: any) => {
                               const checked = promotionForm.productIds.includes(prod.id);
                               return (
                                 <label
