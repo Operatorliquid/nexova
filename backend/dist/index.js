@@ -1961,6 +1961,7 @@ app.get("/api/commerce/metrics", auth_1.authMiddleware, async (req, res) => {
                     include: { product: true },
                 },
                 client: true,
+                promotions: true,
             },
         });
         const totals = {
@@ -1977,6 +1978,9 @@ app.get("/api/commerce/metrics", auth_1.authMiddleware, async (req, res) => {
         const fallbackClients = new Set();
         const productAgg = new Map();
         const daily = new Map();
+        const promoUsage = new Map();
+        let ordersWithPromo = 0;
+        let totalDiscountEstimate = 0;
         orders.forEach((order) => {
             var _a, _b, _c, _d;
             const paid = (_a = order.paidAmount) !== null && _a !== void 0 ? _a : 0;
@@ -2006,7 +2010,7 @@ app.get("/api/commerce/metrics", auth_1.authMiddleware, async (req, res) => {
             entry.total += (_d = order.totalAmount) !== null && _d !== void 0 ? _d : 0;
             daily.set(dayKey, entry);
             order.items.forEach((item) => {
-                var _a;
+                var _a, _b, _c;
                 const name = ((_a = item.product) === null || _a === void 0 ? void 0 : _a.name) || "Producto";
                 const current = productAgg.get(item.productId) || {
                     name,
@@ -2016,7 +2020,22 @@ app.get("/api/commerce/metrics", auth_1.authMiddleware, async (req, res) => {
                 current.quantity += item.quantity;
                 current.revenue += item.quantity * item.unitPrice;
                 productAgg.set(item.productId, current);
+                // estimación de descuento aplicado (precio de lista vs unitPrice)
+                const basePrice = (_c = (_b = item.product) === null || _b === void 0 ? void 0 : _b.price) !== null && _c !== void 0 ? _c : item.unitPrice;
+                const discountPerUnit = Math.max(0, basePrice - item.unitPrice);
+                totalDiscountEstimate += discountPerUnit * item.quantity;
             });
+            if (order.promotions && order.promotions.length > 0) {
+                ordersWithPromo += 1;
+                order.promotions.forEach((promo) => {
+                    const current = promoUsage.get(promo.id) || {
+                        title: promo.title || "Promo",
+                        uses: 0,
+                    };
+                    current.uses += 1;
+                    promoUsage.set(promo.id, current);
+                });
+            }
         });
         const uniqueClients = clientsSet.size || fallbackClients.size;
         const products = Array.from(productAgg.values());
@@ -2038,6 +2057,10 @@ app.get("/api/commerce/metrics", auth_1.authMiddleware, async (req, res) => {
         }))
             .sort((a, b) => a.date.localeCompare(b.date));
         const avgTicketPaid = totals.confirmed > 0 ? Math.round(paidRevenue / totals.confirmed) : 0;
+        const topPromo = promoUsage.size > 0
+            ? Array.from(promoUsage.entries())
+                .sort((a, b) => b[1].uses - a[1].uses)[0]
+            : null;
         res.json({
             totals,
             revenue: {
@@ -2055,6 +2078,13 @@ app.get("/api/commerce/metrics", auth_1.authMiddleware, async (req, res) => {
                 worst: worstProduct,
             },
             daily: dailySeries,
+            promotions: {
+                appliedOrders: ordersWithPromo,
+                totalDiscount: Math.round(totalDiscountEstimate),
+                top: topPromo && topPromo[1]
+                    ? { id: topPromo[0], title: topPromo[1].title, uses: topPromo[1].uses }
+                    : null,
+            },
         });
     }
     catch (error) {

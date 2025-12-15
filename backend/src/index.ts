@@ -2492,6 +2492,7 @@ app.get(
             include: { product: true },
           },
           client: true,
+          promotions: true,
         },
       });
 
@@ -2519,6 +2520,13 @@ app.get(
         string,
         { orders: number; paid: number; total: number }
       >();
+
+      const promoUsage = new Map<
+        number,
+        { title: string; uses: number }
+      >();
+      let ordersWithPromo = 0;
+      let totalDiscountEstimate = 0;
 
       orders.forEach((order) => {
         const paid = order.paidAmount ?? 0;
@@ -2556,7 +2564,24 @@ app.get(
           current.quantity += item.quantity;
           current.revenue += item.quantity * item.unitPrice;
           productAgg.set(item.productId, current);
+
+          // estimación de descuento aplicado (precio de lista vs unitPrice)
+          const basePrice = item.product?.price ?? item.unitPrice;
+          const discountPerUnit = Math.max(0, basePrice - item.unitPrice);
+          totalDiscountEstimate += discountPerUnit * item.quantity;
         });
+
+        if (order.promotions && order.promotions.length > 0) {
+          ordersWithPromo += 1;
+          order.promotions.forEach((promo: any) => {
+            const current = promoUsage.get(promo.id) || {
+              title: promo.title || "Promo",
+              uses: 0,
+            };
+            current.uses += 1;
+            promoUsage.set(promo.id, current);
+          });
+        }
       });
 
       const uniqueClients = clientsSet.size || fallbackClients.size;
@@ -2586,6 +2611,12 @@ app.get(
       const avgTicketPaid =
         totals.confirmed > 0 ? Math.round(paidRevenue / totals.confirmed) : 0;
 
+      const topPromo =
+        promoUsage.size > 0
+          ? Array.from(promoUsage.entries())
+              .sort((a, b) => b[1].uses - a[1].uses)[0]
+          : null;
+
       res.json({
         totals,
         revenue: {
@@ -2603,6 +2634,14 @@ app.get(
           worst: worstProduct,
         },
         daily: dailySeries,
+        promotions: {
+          appliedOrders: ordersWithPromo,
+          totalDiscount: Math.round(totalDiscountEstimate),
+          top:
+            topPromo && topPromo[1]
+              ? { id: topPromo[0], title: topPromo[1].title, uses: topPromo[1].uses }
+              : null,
+        },
       });
     } catch (error) {
       console.error("[Retail metrics]", error);

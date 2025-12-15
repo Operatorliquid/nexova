@@ -72,6 +72,11 @@ type RetailMetricsResponse = {
     worst: { name: string; quantity: number; revenue: number } | null;
   };
   daily: Array<{ date: string; orders: number; paid: number; total: number }>;
+  promotions?: {
+    appliedOrders: number;
+    totalDiscount: number;
+    top: { id: number; title: string; uses: number } | null;
+  };
 };
 
 type AgendaItem = {
@@ -11431,23 +11436,35 @@ return (
                                 </p>
                               </div>
                               {!!(ord.promotions && ord.promotions.length) && (
-                                <div className="rounded-xl border border-emerald-100 bg-emerald-50 px-3 py-2 space-y-1">
-                                  <p className="text-sm font-semibold text-emerald-800">
-                                    Promociones aplicadas
-                                  </p>
+                                <div className="rounded-xl border border-emerald-200 bg-gradient-to-r from-emerald-50 to-white px-4 py-3 space-y-2 shadow-sm">
+                                  <div className="flex items-center gap-2 text-emerald-800">
+                                    <span className="text-base">🪄</span>
+                                    <div>
+                                      <p className="text-sm font-semibold leading-tight">
+                                        Promos aplicadas
+                                      </p>
+                                      <p className="text-xs text-emerald-700">
+                                        Se aplican al total y quedan registradas en el ticket.
+                                      </p>
+                                    </div>
+                                  </div>
                                   <div className="flex flex-wrap gap-2">
                                     {ord.promotions.map((promo) => (
-                                      <span
+                                      <div
                                         key={promo.id}
-                                        className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-900 bg-white/70 border border-emerald-200 rounded-full px-3 py-1"
+                                        className="inline-flex items-center gap-2 rounded-2xl border border-emerald-200 bg-white px-3 py-2 shadow-sm"
                                       >
-                                        {promo.title}
-                                        <span className="text-[11px] text-emerald-700">
-                                          {promo.discountType === "percent"
-                                            ? `-${promo.discountValue}%`
-                                            : `-$${promo.discountValue.toLocaleString("es-AR")}`}
-                                        </span>
-                                      </span>
+                                        <div className="flex flex-col leading-tight">
+                                          <span className="text-xs font-semibold text-emerald-900">
+                                            {promo.title}
+                                          </span>
+                                          <span className="text-[11px] text-emerald-700">
+                                            {promo.discountType === "percent"
+                                              ? `-${promo.discountValue}%`
+                                              : `-$${promo.discountValue.toLocaleString("es-AR")}`}
+                                          </span>
+                                        </div>
+                                      </div>
                                     ))}
                                   </div>
                                 </div>
@@ -12422,7 +12439,7 @@ return (
                         </p>
                         <p className="text-xs text-muted mt-1">En el rango seleccionado</p>
                       </div>
-                    </div>
+                      </div>
 
                     <div className="grid gap-4 lg:grid-cols-3">
                       <div className="rounded-2xl card-surface p-5 space-y-3 lg:col-span-2">
@@ -12518,6 +12535,32 @@ return (
                                 {retailMetrics.products.worst.quantity} unidades · ${" "}
                                 {retailMetrics.products.worst.revenue.toLocaleString("es-AR")}
                               </p>
+                            </>
+                          ) : (
+                            <p className="text-muted text-xs">Sin datos</p>
+                          )}
+                        </div>
+                        <div className="rounded-xl card-muted p-3 space-y-2 text-sm">
+                          <p className="text-xs uppercase tracking-wide text-emerald-200">
+                            Promos
+                          </p>
+                          {retailMetrics.promotions ? (
+                            <>
+                              <p className="font-semibold text-white">
+                                {retailMetrics.promotions.appliedOrders} pedidos con promo
+                              </p>
+                              <p className="text-muted text-xs">
+                                Ahorro estimado: ${" "}
+                                {retailMetrics.promotions.totalDiscount.toLocaleString("es-AR")}
+                              </p>
+                              {retailMetrics.promotions.top ? (
+                                <p className="text-[11px] text-emerald-100">
+                                  Top: {retailMetrics.promotions.top.title} (
+                                  {retailMetrics.promotions.top.uses} usos)
+                                </p>
+                              ) : (
+                                <p className="text-[11px] text-muted">Sin promos usadas</p>
+                              )}
                             </>
                           ) : (
                             <p className="text-muted text-xs">Sin datos</p>
