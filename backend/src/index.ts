@@ -161,7 +161,7 @@ const PRODUCT_CATEGORY_OPTIONS = [
   { key: "cleaning", label: "Limpieza" },
   { key: "personal_care", label: "Cuidado personal" },
 ] as const;
-const PRODUCT_CATEGORY_SET = new Set(
+const PRODUCT_CATEGORY_SET: Set<string> = new Set(
   PRODUCT_CATEGORY_OPTIONS.map((option) => option.key)
 );
 
@@ -3775,16 +3775,21 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
           preferredHourMinutes: null,
           preferredDayHasAvailability: null,
         },
-        doctorProfile: {},
+        doctorProfile: {
+          specialty: null,
+          clinicName: null,
+          officeAddress: null,
+          officeCity: null,
+          officeMapsUrl: null,
+          officeDays: null,
+          officeHours: null,
+          contactPhone: null,
+          consultationPrice: null,
+          emergencyConsultationPrice: null,
+          additionalNotes: null,
+          slotMinutes: null,
+        },
         productCatalog,
-        pendingOrders: pendingOrdersForAgent.map((o) => ({
-          sequenceNumber: o.sequenceNumber,
-          status: o.status,
-          items: o.items.map((it) => ({
-            name: it.product?.name || "producto",
-            quantity: it.quantity,
-          })),
-        })),
       });
 
       if (!agentResult) return res.sendStatus(200);
@@ -3860,6 +3865,17 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
     let patient: Patient | null = await prisma.patient.findFirst({
       where: { phone: phoneE164, doctorId: doctor.id },
     });
+    const isRetailDoctor = (doctor.businessType as any) === "RETAIL";
+    if (!patient) {
+      patient = await prisma.patient.create({
+        data: {
+          doctorId: doctor.id,
+          phone: phoneE164,
+          fullName: "Paciente WhatsApp",
+          needsName: true,
+        },
+      });
+    }
 
     // 2) Guardar mensaje normal
     const savedIncoming = await prisma.message.create({
@@ -3880,7 +3896,7 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
 
     const doctorAvailabilityStatus = doctor.availabilityStatus || "available";
     if (
-      doctor.businessType !== "RETAIL" &&
+      !isRetailDoctor &&
       (doctorAvailabilityStatus === "unavailable" ||
         doctorAvailabilityStatus === "vacation")
     ) {
@@ -4010,7 +4026,7 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
     );
     const slotsForAgent = slotAlignment.slotsForAgent;
     const productCatalog =
-      doctor.businessType === "RETAIL"
+      isRetailDoctor
         ? (
             await prisma.product.findMany({
               where: { doctorId: doctor.id },
@@ -4052,13 +4068,13 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
       }))
       .filter((m) => m.text.trim().length > 0);
 
-    const flowResult =
-      doctor.businessType === "RETAIL"
+    const flowResult: any =
+      isRetailDoctor
         ? { handled: false }
         : await handleConversationFlow({
             incomingText: bodyText,
             timezone: DEFAULT_TIMEZONE,
-            businessType: doctor.businessType as "HEALTH" | "BEAUTY" | "RETAIL",
+            businessType: doctor.businessType as any,
             patient: {
               id: patient.id,
               fullName: patient.fullName,
@@ -4094,7 +4110,7 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
               }),
           });
 
-    if (doctor.businessType === "RETAIL") {
+    if (isRetailDoctor) {
       // Saltamos la máquina de estado de salud; el agente retail se maneja arriba.
     } else if (flowResult.handled) {
       if (
@@ -4254,7 +4270,7 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
     };
 
     // Rama retail: directo al handler y saltar lógica de salud
-    if (doctor.businessType === "RETAIL") {
+    if (isRetailDoctor) {
       const agentResult = await runWhatsappAgent({
         text: bodyText,
         patientName: patient.fullName,
@@ -4266,7 +4282,20 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
         availableSlots: [],
         recentMessages,
         patientProfile: patientProfilePayload,
-        doctorProfile: {},
+        doctorProfile: {
+          specialty: null,
+          clinicName: null,
+          officeAddress: null,
+          officeCity: null,
+          officeMapsUrl: null,
+          officeDays: null,
+          officeHours: null,
+          contactPhone: null,
+          consultationPrice: null,
+          emergencyConsultationPrice: null,
+          additionalNotes: null,
+          slotMinutes: null,
+        },
         productCatalog,
       });
 
@@ -4337,7 +4366,7 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
       const retailHandled = await handleRetailAgentAction({
         doctor,
         patient,
-        retailClient: retailClient,
+        retailClient: null,
         action,
         replyToPatient,
         phoneE164,
@@ -4391,7 +4420,7 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
       availableSlots,
       slotsForAgent,
       productCatalog,
-      activeAppointment,
+      activeAppointment: activeAppointmentSummary,
       timezone: DEFAULT_TIMEZONE,
     });
 

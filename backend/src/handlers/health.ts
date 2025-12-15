@@ -1,12 +1,8 @@
 import { Prisma, Patient, BusinessType } from "@prisma/client";
 import { runWhatsappAgent, AvailableSlot } from "../ai";
 import {
-  normalizeAgentProvidedName,
   normalizeInsuranceAnswer,
-  sanitizeReason,
   normalizeDniInput,
-  parseBirthDateInput,
-  formatPreferredDayLabel,
 } from "../utils/text";
 import { prisma } from "../prisma";
 import { handleConversationFlow } from "../conversation/stateMachine";
@@ -529,23 +525,21 @@ export async function handleHealthWebhookMessage(params: {
 function formatMenuMessage(reply: string, menu?: MenuTemplate) {
   if (!menu) return reply;
   const lines = [reply];
-  if (menu.header) lines.push(menu.header);
   if (menu.options?.length) {
     for (const option of menu.options) {
       lines.push(`- ${option.label}`);
     }
   }
-  if (menu.footer) lines.push(menu.footer);
   return lines.join("\n");
 }
 
-const NON_BLOCKING_APPOINTMENT_STATUSES = [
+const NON_BLOCKING_APPOINTMENT_STATUSES = Array.from([
   "cancelled_by_doctor",
   "cancelled_by_patient",
   "cancelled_by_no_show",
   "cancelled_by_system",
   "completed",
-] as const;
+]);
 
 type BookingRequestParams = {
   doctorId: number;
@@ -845,3 +839,28 @@ async function mergePatientRecords({
     where: { id: targetPatientId },
   });
 }
+// Helpers locales (fallback simples si faltan utilidades)
+const normalizeAgentProvidedName = (name?: string | null) =>
+  (name || "").trim();
+
+const sanitizeReason = (reason?: string | null, _opts?: any) =>
+  (reason || "").trim();
+
+const parseBirthDateInput = (value?: string | null): Date | null => {
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+
+const formatPreferredDayLabel = (date: Date, timezone: string) => {
+  try {
+    return new Intl.DateTimeFormat("es-AR", {
+      weekday: "long",
+      month: "short",
+      day: "2-digit",
+      timeZone: timezone,
+    }).format(date);
+  } catch {
+    return date.toDateString();
+  }
+};

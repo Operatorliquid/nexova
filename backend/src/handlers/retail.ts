@@ -813,9 +813,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
   });
 
   if (!upsert.ok || !upsert.order) {
-    await sendMessage(
-      upsert.error || "No pude guardar el pedido. Probemos de nuevo indicando los productos."
-    );
+    await sendMessage("No pude guardar el pedido. Probemos de nuevo indicando los productos.");
     return true;
   }
 
