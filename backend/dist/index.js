@@ -5527,12 +5527,12 @@ app.post("/api/commerce/promotions", auth_1.authMiddleware, async (req, res) => 
     }
 });
 app.post("/api/commerce/promotions/:id/send", auth_1.authMiddleware, async (req, res) => {
-    var _a;
+    var _a, _b, _c;
     try {
         const doctorId = req.doctorId;
         const doctor = await prisma_1.prisma.doctor.findUnique({
             where: { id: doctorId },
-            select: { businessType: true, whatsappBusinessNumber: true },
+            select: { businessType: true, whatsappBusinessNumber: true, name: true },
         });
         if (!doctor || doctor.businessType !== "RETAIL") {
             return res.status(403).json({ error: "Sección disponible solo para comercios." });
@@ -5547,6 +5547,9 @@ app.post("/api/commerce/promotions/:id/send", auth_1.authMiddleware, async (req,
         }
         const promotion = await prisma_1.prisma.promotion.findFirst({
             where: { id: promotionId, doctorId },
+            include: {
+                _count: true,
+            },
         });
         if (!promotion) {
             return res.status(404).json({ error: "Promoción no encontrada." });
@@ -5563,14 +5566,49 @@ app.post("/api/commerce/promotions/:id/send", auth_1.authMiddleware, async (req,
         if (!clients.length) {
             return res.status(400).json({ error: "No hay clientes con teléfono para enviar." });
         }
+        // Armamos texto enriquecido de la promo
+        const discountLabel = promotion.discountType === "percent"
+            ? `${promotion.discountValue}% OFF`
+            : `$${promotion.discountValue} de descuento`;
+        let validity = "";
+        if (promotion.untilStockOut) {
+            validity = "Válida hasta agotar stock.";
+        }
+        else if (promotion.endDate) {
+            validity = `Vigente hasta ${promotion.endDate.toLocaleDateString("es-AR")}.`;
+        }
+        const productIds = Array.isArray(promotion.productIds)
+            ? promotion.productIds
+            : [];
+        const productNames = productIds.length > 0
+            ? await prisma_1.prisma.product.findMany({
+                where: { id: { in: productIds }, doctorId },
+                select: { name: true },
+                take: 6,
+            })
+            : [];
+        const targetLine = productNames.length > 0
+            ? `Aplica a: ${productNames.map((p) => p.name).join(", ")}`
+            : ((_b = promotion.productTagLabels) === null || _b === void 0 ? void 0 : _b.length)
+                ? `Aplica a tags: ${promotion.productTagLabels.join(", ")}`
+                : "";
+        const promoBlock = [
+            `${promotion.title} — ${discountLabel}`,
+            ((_c = promotion.description) === null || _c === void 0 ? void 0 : _c.trim()) || "",
+            targetLine,
+            validity,
+        ]
+            .filter(Boolean)
+            .join("\n");
+        const finalBody = `${messageRaw}\n\n${promoBlock}`.trim();
         let sent = 0;
-        const mediaUrlRaw = buildPublicUrlFromRequest(promotion.imageUrl, req);
-        const mediaUrl = isLikelyPublicUrl(mediaUrlRaw) ? mediaUrlRaw : undefined;
+        const mediaUrlRaw = buildPublicUrl(promotion.imageUrl) || buildPublicUrlFromRequest(promotion.imageUrl, req);
+        const mediaUrl = mediaUrlRaw && isLikelyPublicUrl(mediaUrlRaw) ? mediaUrlRaw : undefined;
         for (const client of clients) {
             if (!client.phone)
                 continue;
             try {
-                await (0, whatsapp_1.sendWhatsAppText)(client.phone, messageRaw, {
+                await (0, whatsapp_1.sendWhatsAppText)(client.phone, finalBody, {
                     from: doctor.whatsappBusinessNumber,
                 }, mediaUrl);
                 sent += 1;

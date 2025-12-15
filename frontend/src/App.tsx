@@ -2433,8 +2433,20 @@ const [automationMessages, setAutomationMessages] = useState<
       printWindow.document.write(html);
       printWindow.document.close();
       printWindow.focus();
-      printWindow.print();
-      setTimeout(() => printWindow.close(), 300);
+      // Esperamos a que cargue el DOM/imagen antes de disparar print
+      const safePrint = () => {
+        try {
+          printWindow.print();
+        } catch (err) {
+          console.error("Error al imprimir:", err);
+        }
+      };
+      if ("onload" in printWindow) {
+        // Si soporta onload, esperamos el render
+        printWindow.onload = () => safePrint();
+      } else {
+        setTimeout(safePrint, 400);
+      }
     },
     [doctor?.name, doctor?.ticketLogoUrl]
   );
@@ -11436,15 +11448,12 @@ return (
                                 </p>
                               </div>
                               {!!(ord.promotions && ord.promotions.length) && (
-                                <div className="rounded-xl border border-emerald-200 bg-gradient-to-r from-emerald-50 to-white px-4 py-3 space-y-2 shadow-sm">
-                                  <div className="flex items-center gap-2 text-emerald-800">
-                                    <span className="text-base">🪄</span>
+                                <div className="rounded-xl border border-emerald-700/30 bg-emerald-950/50 px-4 py-3 space-y-2 shadow-sm">
+                                  <div className="flex items-center gap-2 text-emerald-100">
+                                    <span className="text-base">🧾</span>
                                     <div>
                                       <p className="text-sm font-semibold leading-tight">
                                         Promos aplicadas
-                                      </p>
-                                      <p className="text-xs text-emerald-700">
-                                        Se aplican al total y quedan registradas en el ticket.
                                       </p>
                                     </div>
                                   </div>
@@ -11452,13 +11461,13 @@ return (
                                     {ord.promotions.map((promo) => (
                                       <div
                                         key={promo.id}
-                                        className="inline-flex items-center gap-2 rounded-2xl border border-emerald-200 bg-white px-3 py-2 shadow-sm"
+                                        className="inline-flex items-center gap-2 rounded-xl border border-emerald-800 bg-emerald-900/70 px-3 py-2 shadow-inner"
                                       >
                                         <div className="flex flex-col leading-tight">
-                                          <span className="text-xs font-semibold text-emerald-900">
+                                          <span className="text-xs font-semibold text-emerald-50">
                                             {promo.title}
                                           </span>
-                                          <span className="text-[11px] text-emerald-700">
+                                          <span className="text-[11px] text-emerald-200">
                                             {promo.discountType === "percent"
                                               ? `-${promo.discountValue}%`
                                               : `-$${promo.discountValue.toLocaleString("es-AR")}`}
@@ -12540,23 +12549,23 @@ return (
                             <p className="text-muted text-xs">Sin datos</p>
                           )}
                         </div>
-                        <div className="rounded-xl card-muted p-3 space-y-2 text-sm">
-                          <p className="text-xs uppercase tracking-wide text-emerald-200">
-                            Promos
+                        <div className="rounded-xl card-muted p-4 space-y-2 text-sm border border-emerald-500/20 bg-emerald-950/50">
+                          <p className="text-[11px] uppercase tracking-wide text-emerald-200 flex items-center gap-2">
+                            <span className="text-base">💡</span>Promos
                           </p>
                           {retailMetrics.promotions ? (
                             <>
                               <p className="font-semibold text-white">
                                 {retailMetrics.promotions.appliedOrders} pedidos con promo
                               </p>
-                              <p className="text-muted text-xs">
+                              <p className="text-[11px] text-emerald-200">
                                 Ahorro estimado: ${" "}
                                 {retailMetrics.promotions.totalDiscount.toLocaleString("es-AR")}
                               </p>
                               {retailMetrics.promotions.top ? (
-                                <p className="text-[11px] text-emerald-100">
-                                  Top: {retailMetrics.promotions.top.title} (
-                                  {retailMetrics.promotions.top.uses} usos)
+                                <p className="text-[12px] text-emerald-100">
+                                  Top: <span className="font-semibold">{retailMetrics.promotions.top.title}</span>{" "}
+                                  ({retailMetrics.promotions.top.uses} usos)
                                 </p>
                               ) : (
                                 <p className="text-[11px] text-muted">Sin promos usadas</p>
