@@ -316,6 +316,9 @@ const buildEmptyInboxData = (): InboxData => ({
   documents: [],
   newAppointments: [],
   incompletePatients: [],
+  newOrders: [],
+  newClients: [],
+  overdueOrders: [],
 });
 
 const INVISIBLE_RISK_LEVEL_META: Record<
@@ -2317,6 +2320,8 @@ const [automationMessages, setAutomationMessages] = useState<
   const [debtFilterInput, setDebtFilterInput] = useState<number>(2);
   const [debtFilterDays, setDebtFilterDays] = useState<number>(2);
   const orderPaymentHydrateRef = useRef<{ orderId: number; version: string } | null>(null);
+  const lastInboxRefreshRef = useRef<number>(0);
+  const lastOrdersRefreshRef = useRef<number>(0);
   const printOrderReceipt = useCallback(
     (order: CommerceOrder) => {
       if (typeof window === "undefined" || !order) return;
@@ -4413,6 +4418,9 @@ const automationAppointmentPool = useMemo(() => {
           incompletePatients: Array.isArray(json.incompletePatients)
             ? (json.incompletePatients as InboxPatient[])
             : [],
+          newOrders: Array.isArray(json.newOrders) ? json.newOrders : [],
+          newClients: Array.isArray(json.newClients) ? json.newClients : [],
+          overdueOrders: Array.isArray(json.overdueOrders) ? json.overdueOrders : [],
         });
       } catch (err: any) {
         console.error("Error al cargar pendientes:", err);
@@ -4439,6 +4447,24 @@ const automationAppointmentPool = useMemo(() => {
       window.clearInterval(intervalId);
     };
   }, [token, fetchInboxData]);
+
+  // Refresco ligero al cambiar de pestaña (sin saturar requests)
+  useEffect(() => {
+    if (!token) return;
+    const now = Date.now();
+    if (now - lastInboxRefreshRef.current > 20_000) {
+      lastInboxRefreshRef.current = now;
+      fetchInboxData({ silent: true });
+    }
+    if (isRetailBusiness) {
+      const shouldRefreshOrders =
+        activeSection === "orders" || activeSection === "dashboard" || activeSection === "debts";
+      if (shouldRefreshOrders && now - lastOrdersRefreshRef.current > 15_000) {
+        lastOrdersRefreshRef.current = now;
+        fetchOrders({ silent: true });
+      }
+    }
+  }, [activeSection, token, isRetailBusiness, fetchInboxData, fetchOrders]);
 
   useEffect(() => {
     if (token) return;

@@ -7534,7 +7534,7 @@ app.get(
 
       if (doctor.businessType === "RETAIL") {
         const recentOrderThreshold = new Date(now.getTime() - 1000 * 60 * 60 * 24 * 3);
-        const recentClientThreshold = new Date(now.getTime() - 1000 * 60 * 60 * 24 * 7);
+        const recentClientThreshold = new Date(now.getTime() - 1000 * 60 * 60 * 24 * 2);
 
         const [newOrders, newClients] = await Promise.all([
           prisma.order.findMany({
@@ -7550,6 +7550,7 @@ app.get(
             where: {
               doctorId,
               createdAt: { gte: recentClientThreshold },
+              orders: { none: {} }, // clientes que aún no tienen pedidos
             },
             orderBy: { createdAt: "desc" },
             take: 25,

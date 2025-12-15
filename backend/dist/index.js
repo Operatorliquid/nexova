@@ -5602,8 +5602,27 @@ app.post("/api/commerce/promotions/:id/send", auth_1.authMiddleware, async (req,
             .join("\n");
         const finalBody = `${messageRaw}\n\n${promoBlock}`.trim();
         let sent = 0;
-        const mediaUrlRaw = buildPublicUrl(promotion.imageUrl) || buildPublicUrlFromRequest(promotion.imageUrl, req);
-        const mediaUrl = mediaUrlRaw && isLikelyPublicUrl(mediaUrlRaw) ? mediaUrlRaw : undefined;
+        const mediaUrl = (() => {
+            if (!promotion.imageUrl)
+                return undefined;
+            const path = promotion.imageUrl.startsWith("/")
+                ? promotion.imageUrl
+                : `/${promotion.imageUrl}`;
+            const envBase = (APP_BASE_URL || "").replace(/\/+$/, "");
+            const host = req.get("host") || "";
+            const hostBase = host ? `https://${host}` : "";
+            const candidates = [hostBase, envBase].filter(Boolean);
+            for (const base of candidates) {
+                if (!base)
+                    continue;
+                const url = `${base}${path}`;
+                if (isLikelyPublicUrl(url) &&
+                    !/localhost|127\.0\.0\.1/i.test(url)) {
+                    return url;
+                }
+            }
+            return undefined;
+        })();
         for (const client of clients) {
             if (!client.phone)
                 continue;
@@ -6101,7 +6120,7 @@ app.get("/api/inbox", auth_1.authMiddleware, async (req, res) => {
         const appointmentRecentThreshold = new Date(now.getTime() - 1000 * 60 * 60 * 24 * 2);
         if (doctor.businessType === "RETAIL") {
             const recentOrderThreshold = new Date(now.getTime() - 1000 * 60 * 60 * 24 * 3);
-            const recentClientThreshold = new Date(now.getTime() - 1000 * 60 * 60 * 24 * 7);
+            const recentClientThreshold = new Date(now.getTime() - 1000 * 60 * 60 * 24 * 2);
             const [newOrders, newClients] = await Promise.all([
                 prisma_1.prisma.order.findMany({
                     where: {
@@ -6116,6 +6135,7 @@ app.get("/api/inbox", auth_1.authMiddleware, async (req, res) => {
                     where: {
                         doctorId,
                         createdAt: { gte: recentClientThreshold },
+                        orders: { none: {} }, // clientes que aún no tienen pedidos
                     },
                     orderBy: { createdAt: "desc" },
                     take: 25,
