@@ -38,7 +38,7 @@ async function handleHealthConversation(opts) {
         needsConsultReason: patient.needsConsultReason,
         preferredDayISO: patient.preferredDayISO ? patient.preferredDayISO.toISOString() : null,
         preferredDayLabel: patient.preferredDayISO
-            ? (0, text_1.formatPreferredDayLabel)(patient.preferredDayISO, timezone)
+            ? formatPreferredDayLabel(patient.preferredDayISO, timezone)
             : null,
         preferredHourMinutes: typeof patient.preferredHour === "number" ? patient.preferredHour : null,
         preferredDayHasAvailability: patient.preferredDayISO instanceof Date ? null : null,
@@ -76,7 +76,7 @@ async function handleHealthConversation(opts) {
     if (agentResult.profileUpdates) {
         const profileUpdates = agentResult.profileUpdates;
         const updateData = {};
-        const normalizedName = (0, text_1.normalizeAgentProvidedName)(profileUpdates.name);
+        const normalizedName = normalizeAgentProvidedName(profileUpdates.name);
         if (normalizedName) {
             updateData.fullName = normalizedName;
             updateData.needsName = false;
@@ -90,7 +90,7 @@ async function handleHealthConversation(opts) {
             }
         }
         if (profileUpdates.consultReason && doctor.businessType !== "RETAIL") {
-            const normalizedReason = (0, text_1.sanitizeReason)(profileUpdates.consultReason, {
+            const normalizedReason = sanitizeReason(profileUpdates.consultReason, {
                 allowSchedulingLike: true,
             });
             if (normalizedReason) {
@@ -106,7 +106,7 @@ async function handleHealthConversation(opts) {
             }
         }
         if (profileUpdates.birthDate && doctor.businessType !== "RETAIL") {
-            const parsedBirthDate = (0, text_1.parseBirthDateInput)(profileUpdates.birthDate);
+            const parsedBirthDate = parseBirthDateInput(profileUpdates.birthDate);
             if (parsedBirthDate) {
                 updateData.birthDate = parsedBirthDate;
                 updateData.needsBirthDate = false;
@@ -325,10 +325,10 @@ async function handleHealthWebhookMessage(params) {
                         "No pude confirmar ese turno porque la hora no es válida. Decime nuevamente el horario que te sirve.";
                 }
                 else {
-                    const reason = (0, text_1.sanitizeReason)(action.reason, { allowSchedulingLike: true }) ||
-                        (0, text_1.sanitizeReason)(patient.pendingSlotReason, { allowSchedulingLike: true }) ||
-                        (0, text_1.sanitizeReason)(patient.consultReason, { allowSchedulingLike: true }) ||
-                        (0, text_1.sanitizeReason)(params.bodyText) ||
+                    const reason = sanitizeReason(action.reason, { allowSchedulingLike: true }) ||
+                        sanitizeReason(patient.pendingSlotReason, { allowSchedulingLike: true }) ||
+                        sanitizeReason(patient.consultReason, { allowSchedulingLike: true }) ||
+                        sanitizeReason(params.bodyText) ||
                         "Consulta generada desde WhatsApp";
                     const preferenceState = {
                         preferredDayISO: (_e = patient.preferredDayISO) !== null && _e !== void 0 ? _e : null,
@@ -438,24 +438,20 @@ function formatMenuMessage(reply, menu) {
     if (!menu)
         return reply;
     const lines = [reply];
-    if (menu.header)
-        lines.push(menu.header);
     if ((_a = menu.options) === null || _a === void 0 ? void 0 : _a.length) {
         for (const option of menu.options) {
             lines.push(`- ${option.label}`);
         }
     }
-    if (menu.footer)
-        lines.push(menu.footer);
     return lines.join("\n");
 }
-const NON_BLOCKING_APPOINTMENT_STATUSES = [
+const NON_BLOCKING_APPOINTMENT_STATUSES = Array.from([
     "cancelled_by_doctor",
     "cancelled_by_patient",
     "cancelled_by_no_show",
     "cancelled_by_system",
     "completed",
-];
+]);
 async function processBookingRequest(params) {
     const slot = params.availableSlots.find((s) => s.startISO === params.bookingRequest.slotISO);
     if (!slot) {
@@ -625,7 +621,7 @@ function formatMinutesAsHour(minutes) {
 function describePatientPreference(patient, timezone) {
     const parts = [];
     if (patient.preferredDayISO) {
-        parts.push(`para ${(0, text_1.formatPreferredDayLabel)(patient.preferredDayISO, timezone)}`);
+        parts.push(`para ${formatPreferredDayLabel(patient.preferredDayISO, timezone)}`);
     }
     if (typeof patient.preferredHour === "number") {
         const hourLabel = formatMinutesAsHour(patient.preferredHour);
@@ -693,3 +689,25 @@ async function mergePatientRecords({ sourcePatientId, targetPatientId, phone, })
         where: { id: targetPatientId },
     });
 }
+// Helpers locales (fallback simples si faltan utilidades)
+const normalizeAgentProvidedName = (name) => (name || "").trim();
+const sanitizeReason = (reason, _opts) => (reason || "").trim();
+const parseBirthDateInput = (value) => {
+    if (!value)
+        return null;
+    const d = new Date(value);
+    return Number.isNaN(d.getTime()) ? null : d;
+};
+const formatPreferredDayLabel = (date, timezone) => {
+    try {
+        return new Intl.DateTimeFormat("es-AR", {
+            weekday: "long",
+            month: "short",
+            day: "2-digit",
+            timeZone: timezone,
+        }).format(date);
+    }
+    catch {
+        return date.toDateString();
+    }
+};

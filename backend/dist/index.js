@@ -177,6 +177,12 @@ function serializeOrderRecord(order) {
         customerAddress: order.customerAddress,
         customerDni: order.customerDni,
         createdAt: order.createdAt,
+        promotions: (order.promotions || []).map((promo) => ({
+            id: promo.id,
+            title: promo.title,
+            discountType: promo.discountType,
+            discountValue: promo.discountValue,
+        })),
         items: (order.items || []).map((item) => {
             var _a, _b, _c;
             return ({
@@ -1387,7 +1393,7 @@ app.post("/api/auth/register", async (req, res) => {
     catch (error) {
         console.error(error);
         res.status(500).json({
-            error: "Error al registrar médico",
+            error: "Error al registrar usuario",
         });
     }
 });
@@ -2766,7 +2772,7 @@ app.post("/api/whatsapp/broadcast", auth_1.authMiddleware, async (req, res) => {
         }
         return res.json({
             ok: true,
-            total: patients.length,
+            total: recipients.length,
             sent,
             failed: failures.length,
             failures,
@@ -2993,19 +2999,21 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                     preferredHourMinutes: null,
                     preferredDayHasAvailability: null,
                 },
-                doctorProfile: {},
+                doctorProfile: {
+                    specialty: null,
+                    clinicName: null,
+                    officeAddress: null,
+                    officeCity: null,
+                    officeMapsUrl: null,
+                    officeDays: null,
+                    officeHours: null,
+                    contactPhone: null,
+                    consultationPrice: null,
+                    emergencyConsultationPrice: null,
+                    additionalNotes: null,
+                    slotMinutes: null,
+                },
                 productCatalog,
-                pendingOrders: pendingOrdersForAgent.map((o) => ({
-                    sequenceNumber: o.sequenceNumber,
-                    status: o.status,
-                    items: o.items.map((it) => {
-                        var _a;
-                        return ({
-                            name: ((_a = it.product) === null || _a === void 0 ? void 0 : _a.name) || "producto",
-                            quantity: it.quantity,
-                        });
-                    }),
-                })),
             });
             if (!agentResult)
                 return res.sendStatus(200);
@@ -3073,6 +3081,17 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
         let patient = await prisma_1.prisma.patient.findFirst({
             where: { phone: phoneE164, doctorId: doctor.id },
         });
+        const isRetailDoctor = doctor.businessType === "RETAIL";
+        if (!patient) {
+            patient = await prisma_1.prisma.patient.create({
+                data: {
+                    doctorId: doctor.id,
+                    phone: phoneE164,
+                    fullName: "Paciente WhatsApp",
+                    needsName: true,
+                },
+            });
+        }
         // 2) Guardar mensaje normal
         const savedIncoming = await prisma_1.prisma.message.create({
             data: {
@@ -3089,7 +3108,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
         });
         console.log("💾 Mensaje guardado en DB:", savedIncoming.id);
         const doctorAvailabilityStatus = doctor.availabilityStatus || "available";
-        if (doctor.businessType !== "RETAIL" &&
+        if (!isRetailDoctor &&
             (doctorAvailabilityStatus === "unavailable" ||
                 doctorAvailabilityStatus === "vacation")) {
             const responseText = doctorAvailabilityStatus === "unavailable"
@@ -3179,7 +3198,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
         const availableSlots = await getAvailableSlotsForDoctor(doctor.id);
         const slotAlignment = alignSlotsWithPreferenceForAgent(availableSlots, patient, DEFAULT_TIMEZONE);
         const slotsForAgent = slotAlignment.slotsForAgent;
-        const productCatalog = doctor.businessType === "RETAIL"
+        const productCatalog = isRetailDoctor
             ? (await prisma_1.prisma.product.findMany({
                 where: { doctorId: doctor.id },
                 orderBy: { name: "asc" },
@@ -3218,7 +3237,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
             });
         })
             .filter((m) => m.text.trim().length > 0);
-        const flowResult = doctor.businessType === "RETAIL"
+        const flowResult = isRetailDoctor
             ? { handled: false }
             : await (0, stateMachine_1.handleConversationFlow)({
                 incomingText: bodyText,
@@ -3257,7 +3276,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                     },
                 }),
             });
-        if (doctor.businessType === "RETAIL") {
+        if (isRetailDoctor) {
             // Saltamos la máquina de estado de salud; el agente retail se maneja arriba.
         }
         else if (flowResult.handled) {
@@ -3400,7 +3419,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                 : null,
         };
         // Rama retail: directo al handler y saltar lógica de salud
-        if (doctor.businessType === "RETAIL") {
+        if (isRetailDoctor) {
             const agentResult = await (0, ai_1.runWhatsappAgent)({
                 text: bodyText,
                 patientName: patient.fullName,
@@ -3412,7 +3431,20 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                 availableSlots: [],
                 recentMessages,
                 patientProfile: patientProfilePayload,
-                doctorProfile: {},
+                doctorProfile: {
+                    specialty: null,
+                    clinicName: null,
+                    officeAddress: null,
+                    officeCity: null,
+                    officeMapsUrl: null,
+                    officeDays: null,
+                    officeHours: null,
+                    contactPhone: null,
+                    consultationPrice: null,
+                    emergencyConsultationPrice: null,
+                    additionalNotes: null,
+                    slotMinutes: null,
+                },
                 productCatalog,
             });
             if (!agentResult)
@@ -3479,7 +3511,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
             const retailHandled = await (0, retail_1.handleRetailAgentAction)({
                 doctor,
                 patient,
-                retailClient: retailClient,
+                retailClient: null,
                 action,
                 replyToPatient,
                 phoneE164,
@@ -3525,7 +3557,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
             availableSlots,
             slotsForAgent,
             productCatalog,
-            activeAppointment,
+            activeAppointment: activeAppointmentSummary,
             timezone: DEFAULT_TIMEZONE,
         });
         return res.sendStatus(200);
@@ -5252,6 +5284,7 @@ app.get("/api/commerce/orders", auth_1.authMiddleware, async (req, res) => {
                     include: { product: true },
                 },
                 attachments: true,
+                promotions: true,
             },
         });
         res.json({
@@ -5582,6 +5615,7 @@ app.post("/api/commerce/orders", auth_1.authMiddleware, async (req, res) => {
         const productIds = normalizedItems.map((i) => i.productId);
         const products = await prisma_1.prisma.product.findMany({
             where: { id: { in: productIds }, doctorId },
+            select: { id: true, name: true, price: true, quantity: true, categories: true },
         });
         if (products.length !== productIds.length) {
             return res
@@ -5600,10 +5634,19 @@ app.post("/api/commerce/orders", auth_1.authMiddleware, async (req, res) => {
                 error: `Sin stock suficiente: ${stockIssues.join(", ")}`,
             });
         }
-        const totalAmount = normalizedItems.reduce((acc, item) => {
+        const activePromotions = await (0, retail_2.getActivePromotionsForDoctor)(doctorId);
+        const appliedPromotionIds = new Set();
+        const pricedItems = normalizedItems.map((item) => {
             const product = products.find((p) => p.id === item.productId);
-            return acc + product.price * item.quantity;
-        }, 0);
+            const effective = (0, retail_2.resolvePromotionForProduct)(product, activePromotions);
+            if (effective.promotionId)
+                appliedPromotionIds.add(effective.promotionId);
+            return {
+                ...item,
+                unitPrice: effective.unitPrice,
+            };
+        });
+        const totalAmount = pricedItems.reduce((acc, item) => acc + item.unitPrice * item.quantity, 0);
         let linkedClientId = null;
         if (client === null || client === void 0 ? void 0 : client.retailClientId) {
             const rc = await prisma_1.prisma.retailClient.findFirst({
@@ -5640,16 +5683,20 @@ app.post("/api/commerce/orders", auth_1.authMiddleware, async (req, res) => {
                 customerDni: (client === null || client === void 0 ? void 0 : client.dni) || null,
                 clientId: linkedClientId,
                 items: {
-                    create: normalizedItems.map((item) => ({
+                    create: pricedItems.map((item) => ({
                         productId: item.productId,
                         quantity: item.quantity,
-                        unitPrice: products.find((p) => p.id === item.productId).price,
+                        unitPrice: item.unitPrice,
                     })),
                 },
+                promotions: appliedPromotionIds.size > 0
+                    ? { connect: Array.from(appliedPromotionIds).map((id) => ({ id })) }
+                    : undefined,
             },
             include: {
                 items: { include: { product: true } },
                 attachments: true,
+                promotions: true,
             },
         });
         return res.status(201).json({
@@ -5734,6 +5781,7 @@ app.patch("/api/commerce/orders/:id", auth_1.authMiddleware, async (req, res) =>
             const productIds = normalizedItems.map((i) => i.productId);
             const products = await prisma_1.prisma.product.findMany({
                 where: { id: { in: productIds }, doctorId },
+                select: { id: true, name: true, price: true, quantity: true, categories: true },
             });
             if (products.length !== productIds.length) {
                 return res
@@ -5752,10 +5800,19 @@ app.patch("/api/commerce/orders/:id", auth_1.authMiddleware, async (req, res) =>
                     error: `Sin stock suficiente: ${stockIssues.join(", ")}`,
                 });
             }
-            const totalAmount = normalizedItems.reduce((acc, item) => {
+            const activePromotions = await (0, retail_2.getActivePromotionsForDoctor)(doctorId);
+            const appliedPromotionIds = new Set();
+            const pricedItems = normalizedItems.map((item) => {
                 const product = products.find((p) => p.id === item.productId);
-                return acc + product.price * item.quantity;
-            }, 0);
+                const effective = (0, retail_2.resolvePromotionForProduct)(product, activePromotions);
+                if (effective.promotionId)
+                    appliedPromotionIds.add(effective.promotionId);
+                return {
+                    ...item,
+                    unitPrice: effective.unitPrice,
+                };
+            });
+            const totalAmount = pricedItems.reduce((acc, item) => acc + item.unitPrice * item.quantity, 0);
             await prisma_1.prisma.$transaction([
                 prisma_1.prisma.orderItem.deleteMany({ where: { orderId: order.id } }),
                 prisma_1.prisma.order.update({
@@ -5764,12 +5821,13 @@ app.patch("/api/commerce/orders/:id", auth_1.authMiddleware, async (req, res) =>
                         ...updateData,
                         totalAmount,
                         items: {
-                            create: normalizedItems.map((item) => ({
+                            create: pricedItems.map((item) => ({
                                 productId: item.productId,
                                 quantity: item.quantity,
-                                unitPrice: products.find((p) => p.id === item.productId).price,
+                                unitPrice: item.unitPrice,
                             })),
                         },
+                        promotions: { set: Array.from(appliedPromotionIds).map((id) => ({ id })) },
                     },
                 }),
             ]);
@@ -5782,7 +5840,7 @@ app.patch("/api/commerce/orders/:id", auth_1.authMiddleware, async (req, res) =>
         }
         const updated = await prisma_1.prisma.order.findUnique({
             where: { id: order.id },
-            include: { items: { include: { product: true } }, attachments: true },
+            include: { items: { include: { product: true } }, attachments: true, promotions: true },
         });
         res.json({
             order: updated ? serializeOrderRecord(updated) : null,

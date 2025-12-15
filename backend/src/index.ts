@@ -43,6 +43,8 @@ import {
   matchProductName,
   findPendingOrderForClient,
   upsertRetailOrder,
+  getActivePromotionsForDoctor,
+  resolvePromotionForProduct,
 } from "./utils/retail";
 import { appendMenuHintForBusiness, appendMenuHint } from "./utils/hints";
 import { runRetailAutomationAgent } from "./agents/automationRetail";
@@ -248,6 +250,12 @@ function serializeOrderRecord(order: any) {
     customerAddress: order.customerAddress,
     customerDni: order.customerDni,
     createdAt: order.createdAt,
+    promotions: (order.promotions || []).map((promo: any) => ({
+      id: promo.id,
+      title: promo.title,
+      discountType: promo.discountType,
+      discountValue: promo.discountValue,
+    })),
     items: (order.items || []).map((item: any) => ({
       id: item.id,
       productId: item.productId,
@@ -6482,6 +6490,7 @@ app.get(
             include: { product: true },
           },
           attachments: true,
+          promotions: true,
         },
       });
       res.json({
@@ -6909,6 +6918,7 @@ app.post(
       const productIds = normalizedItems.map((i) => i.productId);
       const products = await prisma.product.findMany({
         where: { id: { in: productIds }, doctorId },
+        select: { id: true, name: true, price: true, quantity: true, categories: true },
       });
 
       if (products.length !== productIds.length) {
@@ -6931,10 +6941,23 @@ app.post(
         });
       }
 
-      const totalAmount = normalizedItems.reduce((acc, item) => {
+      const activePromotions = await getActivePromotionsForDoctor(doctorId);
+      const appliedPromotionIds = new Set<number>();
+
+      const pricedItems = normalizedItems.map((item) => {
         const product = products.find((p) => p.id === item.productId)!;
-        return acc + product.price * item.quantity;
-      }, 0);
+        const effective = resolvePromotionForProduct(product, activePromotions);
+        if (effective.promotionId) appliedPromotionIds.add(effective.promotionId);
+        return {
+          ...item,
+          unitPrice: effective.unitPrice,
+        };
+      });
+
+      const totalAmount = pricedItems.reduce(
+        (acc, item) => acc + item.unitPrice * item.quantity,
+        0
+      );
 
       let linkedClientId: number | null = null;
       if (client?.retailClientId) {
@@ -6973,16 +6996,21 @@ app.post(
           customerDni: client?.dni || null,
           clientId: linkedClientId,
           items: {
-            create: normalizedItems.map((item) => ({
+            create: pricedItems.map((item) => ({
               productId: item.productId,
               quantity: item.quantity,
-              unitPrice: products.find((p) => p.id === item.productId)!.price,
+              unitPrice: item.unitPrice,
             })),
           },
+          promotions:
+            appliedPromotionIds.size > 0
+              ? { connect: Array.from(appliedPromotionIds).map((id) => ({ id })) }
+              : undefined,
         },
         include: {
           items: { include: { product: true } },
           attachments: true,
+          promotions: true,
         },
       });
 
@@ -7093,6 +7121,7 @@ app.patch(
         const productIds = normalizedItems.map((i) => i.productId);
         const products = await prisma.product.findMany({
           where: { id: { in: productIds }, doctorId },
+          select: { id: true, name: true, price: true, quantity: true, categories: true },
         });
 
         if (products.length !== productIds.length) {
@@ -7115,10 +7144,23 @@ app.patch(
           });
         }
 
-        const totalAmount = normalizedItems.reduce((acc, item) => {
+        const activePromotions = await getActivePromotionsForDoctor(doctorId);
+        const appliedPromotionIds = new Set<number>();
+
+        const pricedItems = normalizedItems.map((item) => {
           const product = products.find((p) => p.id === item.productId)!;
-          return acc + product.price * item.quantity;
-        }, 0);
+          const effective = resolvePromotionForProduct(product, activePromotions);
+          if (effective.promotionId) appliedPromotionIds.add(effective.promotionId);
+          return {
+            ...item,
+            unitPrice: effective.unitPrice,
+          };
+        });
+
+        const totalAmount = pricedItems.reduce(
+          (acc, item) => acc + item.unitPrice * item.quantity,
+          0
+        );
 
         await prisma.$transaction([
           prisma.orderItem.deleteMany({ where: { orderId: order.id } }),
@@ -7128,12 +7170,13 @@ app.patch(
               ...updateData,
               totalAmount,
               items: {
-                create: normalizedItems.map((item) => ({
+                create: pricedItems.map((item) => ({
                   productId: item.productId,
                   quantity: item.quantity,
-                  unitPrice: products.find((p) => p.id === item.productId)!.price,
+                  unitPrice: item.unitPrice,
                 })),
               },
+              promotions: { set: Array.from(appliedPromotionIds).map((id) => ({ id })) },
             },
           }),
         ]);
@@ -7146,7 +7189,7 @@ app.patch(
 
       const updated = await prisma.order.findUnique({
         where: { id: order.id },
-        include: { items: { include: { product: true } }, attachments: true },
+        include: { items: { include: { product: true } }, attachments: true, promotions: true },
       });
 
       res.json({

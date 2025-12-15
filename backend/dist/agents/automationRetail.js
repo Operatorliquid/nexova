@@ -10,9 +10,11 @@ Reglas importantes:
 - Para navegar usá exactamente: {"type":"navigate","target":"promotions"|"orders"|"debts"|"stock"|"clients"} (no uses "view").
 - No inventes IDs: usá SOLO los IDs internos que aparecen como "id=123".
 - Para pedidos: "orderIds" SIEMPRE son IDs internos (id=...), NO el #sequenceNumber visible.
+- No agregues acciones extra no pedidas; si el usuario pide una sola cosa, devolvé sólo esa acción (sin recordar deudores ni nada adicional).
 - Si piden recordar deudores, sugerí send_payment_reminders sobre pedidos con saldo pendiente.
 - Si piden subir precios, usá increase_prices_percent con percent y opcionalmente productIds.
 - Si piden sumar/restar stock, usá adjust_stock con productId o productName y delta (positivo o negativo) o setQuantity.
+- Si dicen "eliminar/sacar/borrar" un producto, usá adjust_stock con setQuantity=0 (no inventes un delta).
 - Si solo querés abrir una vista, usá navigate.
 - Si no hay nada para hacer, devolvé noop con una nota breve.
 

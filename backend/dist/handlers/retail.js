@@ -254,6 +254,16 @@ async function handleRetailAgentAction(params) {
         }
     }
     await maybeUpdateProfile();
+    // Si es un cliente nuevo y no tenemos datos mínimos, pedimos DNI y dirección antes de seguir
+    if (!client.dni || !client.businessAddress) {
+        const missing = [];
+        if (!client.dni)
+            missing.push("DNI");
+        if (!client.businessAddress)
+            missing.push("dirección de entrega");
+        await sendMessage(`Para continuar necesito algunos datos: ${missing.join(" y ")}.\nEnviame algo así:\nDNI: 12345678\nDirección: Calle 123, piso/depto.`);
+        return true;
+    }
     // Si piden cancelar, intentamos cancelar el pendiente más reciente
     if (action.type === "retail_cancel_order") {
         const pending = await prisma_1.prisma.order.findFirst({
@@ -636,7 +646,7 @@ async function handleRetailAgentAction(params) {
         customerDni: ((_o = action.clientInfo) === null || _o === void 0 ? void 0 : _o.dni) || client.dni || (patient === null || patient === void 0 ? void 0 : patient.dni) || null,
     });
     if (!upsert.ok || !upsert.order) {
-        await sendMessage(upsert.error || "No pude guardar el pedido. Probemos de nuevo indicando los productos.");
+        await sendMessage("No pude guardar el pedido. Probemos de nuevo indicando los productos.");
         return true;
     }
     const order = upsert.order;

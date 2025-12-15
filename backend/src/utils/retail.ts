@@ -1,4 +1,4 @@
-import { Patient, Product, RetailClient } from "@prisma/client";
+import { Patient, Product, Promotion, RetailClient } from "@prisma/client";
 import { prisma } from "../prisma";
 
 export async function ensureRetailClientForPatient(opts: {
@@ -118,8 +118,10 @@ export async function upsertRetailOrder(params: {
 
   const products = await prisma.product.findMany({
     where: { id: { in: incomingProductIds }, doctorId },
-    select: { id: true, price: true },
+    select: { id: true, price: true, categories: true },
   });
+
+  const activePromotions = await getActivePromotionsForDoctor(doctorId);
 
   const priceByProductId = new Map(products.map((p) => [p.id, p.price]));
 
@@ -146,6 +148,8 @@ export async function upsertRetailOrder(params: {
         // comportamiento viejo
         await tx.orderItem.deleteMany({ where: { orderId } });
 
+        const appliedPromotionIds = new Set<number>();
+
         await tx.order.update({
           where: { id: orderId },
           data: {
@@ -160,12 +164,18 @@ export async function upsertRetailOrder(params: {
             paymentStatus: "unpaid",
             paidAmount: 0,
             items: {
-              create: items.map((item) => ({
-                productId: item.productId,
-                quantity: item.quantity,
-                unitPrice: priceByProductId.get(item.productId)!,
-              })),
+              create: items.map((item) => {
+                const product = products.find((p) => p.id === item.productId)!;
+                const effective = resolvePromotionForProduct(product, activePromotions);
+                if (effective.promotionId) appliedPromotionIds.add(effective.promotionId);
+                return {
+                  productId: item.productId,
+                  quantity: item.quantity,
+                  unitPrice: effective.unitPrice,
+                };
+              }),
             },
+            promotions: { set: Array.from(appliedPromotionIds).map((id) => ({ id })) },
           },
         });
       } else {
@@ -182,17 +192,21 @@ export async function upsertRetailOrder(params: {
           prevQty.set(it.productId, (prevQty.get(it.productId) ?? 0) + it.quantity);
         }
 
+        const appliedPromotionIds = new Set<number>();
+
         // Calculamos la cantidad final por producto del mensaje
         const finalRows = items.map((item) => {
           const prev = prevQty.get(item.productId) ?? 0;
           const finalQty = effectiveMode === "merge" ? prev + item.quantity : item.quantity;
-          const unitPrice = priceByProductId.get(item.productId);
-          if (unitPrice == null) {
+          const product = products.find((p) => p.id === item.productId);
+          if (!product) {
             throw new Error(
               `Producto ${item.productId} no encontrado o no pertenece al doctor ${doctorId}`
             );
           }
-          return { productId: item.productId, quantity: finalQty, unitPrice };
+          const effective = resolvePromotionForProduct(product, activePromotions);
+          if (effective.promotionId) appliedPromotionIds.add(effective.promotionId);
+          return { productId: item.productId, quantity: finalQty, unitPrice: effective.unitPrice };
         });
 
         // Borramos SOLO los items de esos productos (evita duplicados)
@@ -219,6 +233,7 @@ export async function upsertRetailOrder(params: {
             inventoryDeductedAt: null,
             paymentStatus: "unpaid",
             paidAmount: 0,
+            promotions: { set: Array.from(appliedPromotionIds).map((id) => ({ id })) },
           },
         });
       }
@@ -244,21 +259,32 @@ export async function upsertRetailOrder(params: {
 
       orderId = created.id;
 
+      const appliedPromotionIds = new Set<number>();
+
       await tx.orderItem.createMany({
         data: items.map((item) => {
-          const unitPrice = priceByProductId.get(item.productId);
-          if (unitPrice == null) {
+          const product = products.find((p) => p.id === item.productId);
+          if (!product) {
             throw new Error(
               `Producto ${item.productId} no encontrado o no pertenece al doctor ${doctorId}`
             );
           }
+          const effective = resolvePromotionForProduct(product, activePromotions);
+          if (effective.promotionId) appliedPromotionIds.add(effective.promotionId);
           return {
             orderId: orderId!,
             productId: item.productId,
             quantity: item.quantity,
-            unitPrice,
+            unitPrice: effective.unitPrice,
           };
         }),
+      });
+
+      await tx.order.update({
+        where: { id: orderId! },
+        data: {
+          promotions: { set: Array.from(appliedPromotionIds).map((id) => ({ id })) },
+        },
       });
     }
 
@@ -285,6 +311,77 @@ export async function upsertRetailOrder(params: {
 }
 
 // Helpers internos
+
+export async function getActivePromotionsForDoctor(doctorId: number) {
+  const now = new Date();
+  return prisma.promotion.findMany({
+    where: {
+      doctorId,
+      isActive: true,
+      startDate: { lte: now },
+      OR: [{ endDate: null }, { endDate: { gt: now } }],
+    },
+  });
+}
+
+function parseProductIds(raw: any): number[] {
+  if (!raw) return [];
+  if (Array.isArray(raw)) {
+    return raw
+      .map((v) => Number(v))
+      .filter((v) => Number.isFinite(v) && v > 0)
+      .map((v) => Math.trunc(v));
+  }
+  return [];
+}
+
+export function resolvePromotionForProduct(
+  product: { id: number; price: number; categories?: string[] | null },
+  promotions: Promotion[]
+): { unitPrice: number; promotionId: number | null } {
+  const basePrice = product.price;
+  if (!promotions || promotions.length === 0) {
+    return { unitPrice: basePrice, promotionId: null };
+  }
+
+  const categories = Array.isArray(product.categories)
+    ? product.categories.map((c) => c.toLowerCase())
+    : [];
+
+  let bestPromo: Promotion | null = null;
+  let bestDiscount = 0;
+
+  for (const promo of promotions) {
+    const promoProductIds = parseProductIds((promo as any).productIds);
+    const productMatch = promoProductIds.includes(product.id);
+    const tagMatch = Array.isArray(promo.productTagLabels)
+      ? promo.productTagLabels.some((t) => categories.includes(t.toLowerCase()))
+      : false;
+
+    if (!productMatch && !tagMatch) continue;
+
+    const discount =
+      promo.discountType === "percent"
+        ? Math.round((basePrice * promo.discountValue) / 100)
+        : promo.discountValue;
+    const cappedDiscount = Math.max(0, Math.min(discount, basePrice));
+
+    if (cappedDiscount > bestDiscount) {
+      bestDiscount = cappedDiscount;
+      bestPromo = promo;
+    }
+  }
+
+  if (!bestPromo || bestDiscount <= 0) {
+    return { unitPrice: basePrice, promotionId: null };
+  }
+
+  return {
+    unitPrice: Math.max(0, basePrice - bestDiscount),
+    promotionId: bestPromo.id,
+  };
+}
+
 function normalizeText(value: string): string {
   return value
     .normalize("NFD")

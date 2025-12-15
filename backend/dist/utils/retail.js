@@ -5,6 +5,8 @@ exports.ensureRetailClientForPhone = ensureRetailClientForPhone;
 exports.matchProductName = matchProductName;
 exports.findPendingOrderForClient = findPendingOrderForClient;
 exports.upsertRetailOrder = upsertRetailOrder;
+exports.getActivePromotionsForDoctor = getActivePromotionsForDoctor;
+exports.resolvePromotionForProduct = resolvePromotionForProduct;
 const prisma_1 = require("../prisma");
 async function ensureRetailClientForPatient(opts) {
     const { doctorId, patient } = opts;
@@ -83,8 +85,9 @@ async function upsertRetailOrder(params) {
     const incomingProductIds = Array.from(new Set(items.map((i) => i.productId)));
     const products = await prisma_1.prisma.product.findMany({
         where: { id: { in: incomingProductIds }, doctorId },
-        select: { id: true, price: true },
+        select: { id: true, price: true, categories: true },
     });
+    const activePromotions = await getActivePromotionsForDoctor(doctorId);
     const priceByProductId = new Map(products.map((p) => [p.id, p.price]));
     let orderId = existingOrderId !== null && existingOrderId !== void 0 ? existingOrderId : null;
     let sequenceNumber = null;
@@ -104,6 +107,7 @@ async function upsertRetailOrder(params) {
             if (effectiveMode === "replace") {
                 // comportamiento viejo
                 await tx.orderItem.deleteMany({ where: { orderId } });
+                const appliedPromotionIds = new Set();
                 await tx.order.update({
                     where: { id: orderId },
                     data: {
@@ -118,12 +122,19 @@ async function upsertRetailOrder(params) {
                         paymentStatus: "unpaid",
                         paidAmount: 0,
                         items: {
-                            create: items.map((item) => ({
-                                productId: item.productId,
-                                quantity: item.quantity,
-                                unitPrice: priceByProductId.get(item.productId),
-                            })),
+                            create: items.map((item) => {
+                                const product = products.find((p) => p.id === item.productId);
+                                const effective = resolvePromotionForProduct(product, activePromotions);
+                                if (effective.promotionId)
+                                    appliedPromotionIds.add(effective.promotionId);
+                                return {
+                                    productId: item.productId,
+                                    quantity: item.quantity,
+                                    unitPrice: effective.unitPrice,
+                                };
+                            }),
                         },
+                        promotions: { set: Array.from(appliedPromotionIds).map((id) => ({ id })) },
                     },
                 });
             }
@@ -138,16 +149,20 @@ async function upsertRetailOrder(params) {
                 for (const it of existingSame) {
                     prevQty.set(it.productId, ((_a = prevQty.get(it.productId)) !== null && _a !== void 0 ? _a : 0) + it.quantity);
                 }
+                const appliedPromotionIds = new Set();
                 // Calculamos la cantidad final por producto del mensaje
                 const finalRows = items.map((item) => {
                     var _a;
                     const prev = (_a = prevQty.get(item.productId)) !== null && _a !== void 0 ? _a : 0;
                     const finalQty = effectiveMode === "merge" ? prev + item.quantity : item.quantity;
-                    const unitPrice = priceByProductId.get(item.productId);
-                    if (unitPrice == null) {
+                    const product = products.find((p) => p.id === item.productId);
+                    if (!product) {
                         throw new Error(`Producto ${item.productId} no encontrado o no pertenece al doctor ${doctorId}`);
                     }
-                    return { productId: item.productId, quantity: finalQty, unitPrice };
+                    const effective = resolvePromotionForProduct(product, activePromotions);
+                    if (effective.promotionId)
+                        appliedPromotionIds.add(effective.promotionId);
+                    return { productId: item.productId, quantity: finalQty, unitPrice: effective.unitPrice };
                 });
                 // Borramos SOLO los items de esos productos (evita duplicados)
                 await tx.orderItem.deleteMany({
@@ -171,6 +186,7 @@ async function upsertRetailOrder(params) {
                         inventoryDeductedAt: null,
                         paymentStatus: "unpaid",
                         paidAmount: 0,
+                        promotions: { set: Array.from(appliedPromotionIds).map((id) => ({ id })) },
                     },
                 });
             }
@@ -195,19 +211,29 @@ async function upsertRetailOrder(params) {
                 },
             });
             orderId = created.id;
+            const appliedPromotionIds = new Set();
             await tx.orderItem.createMany({
                 data: items.map((item) => {
-                    const unitPrice = priceByProductId.get(item.productId);
-                    if (unitPrice == null) {
+                    const product = products.find((p) => p.id === item.productId);
+                    if (!product) {
                         throw new Error(`Producto ${item.productId} no encontrado o no pertenece al doctor ${doctorId}`);
                     }
+                    const effective = resolvePromotionForProduct(product, activePromotions);
+                    if (effective.promotionId)
+                        appliedPromotionIds.add(effective.promotionId);
                     return {
                         orderId: orderId,
                         productId: item.productId,
                         quantity: item.quantity,
-                        unitPrice,
+                        unitPrice: effective.unitPrice,
                     };
                 }),
+            });
+            await tx.order.update({
+                where: { id: orderId },
+                data: {
+                    promotions: { set: Array.from(appliedPromotionIds).map((id) => ({ id })) },
+                },
             });
         }
         // ✅ Recalcular totalAmount desde la DB (siempre correcto)
@@ -228,6 +254,63 @@ async function upsertRetailOrder(params) {
     return { ok: true, order: upserted };
 }
 // Helpers internos
+async function getActivePromotionsForDoctor(doctorId) {
+    const now = new Date();
+    return prisma_1.prisma.promotion.findMany({
+        where: {
+            doctorId,
+            isActive: true,
+            startDate: { lte: now },
+            OR: [{ endDate: null }, { endDate: { gt: now } }],
+        },
+    });
+}
+function parseProductIds(raw) {
+    if (!raw)
+        return [];
+    if (Array.isArray(raw)) {
+        return raw
+            .map((v) => Number(v))
+            .filter((v) => Number.isFinite(v) && v > 0)
+            .map((v) => Math.trunc(v));
+    }
+    return [];
+}
+function resolvePromotionForProduct(product, promotions) {
+    const basePrice = product.price;
+    if (!promotions || promotions.length === 0) {
+        return { unitPrice: basePrice, promotionId: null };
+    }
+    const categories = Array.isArray(product.categories)
+        ? product.categories.map((c) => c.toLowerCase())
+        : [];
+    let bestPromo = null;
+    let bestDiscount = 0;
+    for (const promo of promotions) {
+        const promoProductIds = parseProductIds(promo.productIds);
+        const productMatch = promoProductIds.includes(product.id);
+        const tagMatch = Array.isArray(promo.productTagLabels)
+            ? promo.productTagLabels.some((t) => categories.includes(t.toLowerCase()))
+            : false;
+        if (!productMatch && !tagMatch)
+            continue;
+        const discount = promo.discountType === "percent"
+            ? Math.round((basePrice * promo.discountValue) / 100)
+            : promo.discountValue;
+        const cappedDiscount = Math.max(0, Math.min(discount, basePrice));
+        if (cappedDiscount > bestDiscount) {
+            bestDiscount = cappedDiscount;
+            bestPromo = promo;
+        }
+    }
+    if (!bestPromo || bestDiscount <= 0) {
+        return { unitPrice: basePrice, promotionId: null };
+    }
+    return {
+        unitPrice: Math.max(0, basePrice - bestDiscount),
+        promotionId: bestPromo.id,
+    };
+}
 function normalizeText(value) {
     return value
         .normalize("NFD")

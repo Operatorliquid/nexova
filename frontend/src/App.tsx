@@ -181,6 +181,12 @@ type CommerceOrder = {
   customerAddress: string | null;
   customerDni: string | null;
   createdAt: string;
+  promotions?: Array<{
+    id: number;
+    title: string;
+    discountType: string;
+    discountValue: number;
+  }>;
   items: CommerceOrderItem[];
   attachments?: Array<{
     id: number;
@@ -2337,6 +2343,17 @@ const [automationMessages, setAutomationMessages] = useState<
         )
         .join("");
 
+      const promoSummary =
+        order.promotions && order.promotions.length
+          ? order.promotions
+              .map((p) =>
+                p.discountType === "percent"
+                  ? `${p.title} (-${p.discountValue}%)`
+                  : `${p.title} (-$${p.discountValue.toLocaleString("es-AR")})`
+              )
+              .join(" • ")
+          : "";
+
       const html = `
         <!doctype html>
         <html>
@@ -2391,6 +2408,13 @@ const [automationMessages, setAutomationMessages] = useState<
                   </tbody>
                 </table>
               </div>
+              ${
+                promoSummary
+                  ? `<div class="section" style="font-size:12px;color:#2c7a4b;">
+                Promociones: ${promoSummary}
+              </div>`
+                  : ""
+              }
               <div class="section total">
                 Total: $${order.totalAmount.toLocaleString("es-AR")}
               </div>
@@ -11223,6 +11247,11 @@ return (
                               >
                                 {payStatusLabel}
                               </span>
+                              {!!(order.promotions && order.promotions.length) && (
+                                <span className="text-[11px] px-3 py-1 rounded-full bg-emerald-500/15 text-emerald-100 border border-emerald-500/30">
+                                  Promo aplicada
+                                </span>
+                              )}
                             </div>
                           </div>
                           <div className="flex items-center justify-between pt-1">
@@ -11401,6 +11430,28 @@ return (
                                   {ord.totalAmount.toLocaleString("es-AR")})
                                 </p>
                               </div>
+                              {!!(ord.promotions && ord.promotions.length) && (
+                                <div className="rounded-xl border border-emerald-100 bg-emerald-50 px-3 py-2 space-y-1">
+                                  <p className="text-sm font-semibold text-emerald-800">
+                                    Promociones aplicadas
+                                  </p>
+                                  <div className="flex flex-wrap gap-2">
+                                    {ord.promotions.map((promo) => (
+                                      <span
+                                        key={promo.id}
+                                        className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-900 bg-white/70 border border-emerald-200 rounded-full px-3 py-1"
+                                      >
+                                        {promo.title}
+                                        <span className="text-[11px] text-emerald-700">
+                                          {promo.discountType === "percent"
+                                            ? `-${promo.discountValue}%`
+                                            : `-$${promo.discountValue.toLocaleString("es-AR")}`}
+                                        </span>
+                                      </span>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
                               <div className="rounded-xl border border-slate-200 overflow-hidden">
                                 <div className="grid grid-cols-4 text-xs font-semibold text-slate-600 px-3 py-2 bg-slate-50">
                                   <span className="col-span-2">Producto</span>
