@@ -25,6 +25,7 @@ model Doctor {
   officeHours            String?
   consultFee             String?
   emergencyFee           String?
+  businessAlias          String?
   contactPhone           String?
   extraNotes             String?
   gender                 String?

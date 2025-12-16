@@ -189,6 +189,25 @@ const isNo = (txt: string) => {
   return /^(no|nop|nah|negativo)$/.test(t);
 };
 
+function asksPaymentMethod(raw: string) {
+  const t = (raw || "").toLowerCase();
+  return (
+    /\b(alias|cbu|cvu)\b/.test(t) ||
+    /(a\s*donde|donde)\s*(te\s*)?(puedo\s*)?(transferir|depositar|pagar|mandar)/.test(t) ||
+    /(pasame|pasa|mandame|manda)\s*(el\s*)?(alias|cbu|cvu)/.test(t) ||
+    /(como|cómo)\s*(te\s*)?(pago|transfero|transfiero)/.test(t) ||
+    /(enviar|mandar)\s*(la\s*)?(plata|dinero)/.test(t)
+  );
+}
+
+function formatAliasReply(businessAlias: string) {
+  const clean = businessAlias.trim();
+  const isCBU = /^\d{20,26}$/.test(clean);
+  return isCBU
+    ? `Dale 🙌 Te paso el CBU/CVU:\n*${clean}*\n\nCuando transfieras, avisame y si querés mandá el comprobante.`
+    : `Dale 🙌 Mi alias es:\n*${clean}*\n\nCuando transfieras, avisame y si querés mandá el comprobante.`;
+}
+
 function extractOrderSeqFromText(text: string): number | null {
   if (!text) return null;
   const m1 = text.match(/pedido\s*#?\s*(\d+)/i);
@@ -707,6 +726,19 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
   }
 
   const msgText = (rawText || "").trim();
+
+  // ✅ Alias/CBU (determinístico)
+  if (asksPaymentMethod(msgText)) {
+    const alias = (doctor as any)?.businessAlias?.trim?.();
+    if (!alias) {
+      await sendMessage(
+        "Todavía no tengo cargado el alias/CBU acá 😕 Decime y te lo paso enseguida."
+      );
+      return true;
+    }
+    await sendMessage(formatAliasReply(alias));
+    return true;
+  }
 
   // ✅ Asignación de comprobantes (intercepta antes de confirmar pedido)
   const lastBotMsgRow = await prisma.message.findFirst({

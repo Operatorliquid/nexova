@@ -3727,22 +3727,23 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
 
     const doctor = await prisma.doctor.findFirst({
       where: { whatsappBusinessNumber: doctorNumber },
-      select: {
-        id: true,
-        name: true,
-        businessType: true,
-        specialty: true,
-        clinicAddress: true,
-        contactPhone: true,
-        consultFee: true,
-        emergencyFee: true,
-        clinicName: true,
-        officeDays: true,
-        officeHours: true,
-        extraNotes: true,
-        whatsappBusinessNumber: true,
-        availabilityStatus: true,
-      },
+        select: {
+          id: true,
+          name: true,
+          businessType: true,
+          specialty: true,
+          clinicAddress: true,
+          contactPhone: true,
+          consultFee: true,
+          emergencyFee: true,
+          clinicName: true,
+          officeDays: true,
+          officeHours: true,
+          extraNotes: true,
+          whatsappBusinessNumber: true,
+          availabilityStatus: true,
+          businessAlias: true,
+        },
     });
 
     if (!doctor) {
@@ -4092,6 +4093,7 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
           address: (doctor as any).clinicAddress || null,
           hours: (doctor as any).officeHours || null,
           notes: (doctor as any).extraNotes || null,
+          businessAlias: (doctor as any).businessAlias ?? null,
         },
         incomingMedia: {
           count: mediaItems.length,
@@ -5026,6 +5028,7 @@ app.get(
 
         bio: (doc as any).extraNotes ?? null,
         appointmentSlotMinutes: doc.appointmentSlotMinutes ?? null,
+        businessAlias: (doc as any).businessAlias ?? null,
       });
     } catch (error: any) {
       console.error("Error en /api/me/profile (GET):", error);
@@ -5082,6 +5085,7 @@ app.put(
         bio?: string | null;
         appointmentSlotMinutes?: number | string | null;
         availabilityStatus?: string | null;
+        businessAlias?: string | null;
       };
 
       // Serializamos los precios a string para guardarlos en consultFee/emergencyFee
@@ -5105,12 +5109,15 @@ app.put(
           ? normalizeDoctorAvailabilityStatus(availabilityStatus)
           : null;
 
+      const businessAlias = (req.body as any)?.businessAlias ?? null;
+
       const updateData: Prisma.DoctorUpdateInput = {
         specialty: specialty ?? null,
         clinicName: clinicName ?? null,
         ticketLogoUrl: ticketLogoUrl ?? null,
         // officeAddress del front → clinicAddress en la DB
         clinicAddress: officeAddress ?? null,
+        businessAlias: businessAlias ?? null,
         officeDays: officeDays ?? null,
         officeHours: officeHours ?? null,
         contactPhone: contactPhone ?? null,

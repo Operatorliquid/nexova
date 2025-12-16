@@ -54,6 +54,7 @@ Reglas de comportamiento:
 - Si el cliente cancela todo, usá "type": "retail_cancel_order".
 - Si el mensaje es confuso, usá "type": "ask_clarification" y en "reply" pedí aclaración concreta.
 - Si solo pregunta precios, horarios, stock o info general, usá "type": "general".
+- Si piden datos para pagar/transferir (alias, CBU/CVU, "a dónde transfiero", "pasame el alias", "a dónde te mando la plata", "cómo te pago"), respondé con el Alias/CBU del negocio que viene en el contexto (Info del negocio). Acción: "general". Si NO hay alias/cbu cargado en el contexto, decí: "Todavía no tengo cargado el alias/CBU acá. Decime y te lo paso."
 
 Precios / promos:
 - Si preguntan precio de un producto y está en el catálogo/contexto, respondé con el precio.
@@ -87,18 +88,19 @@ async function runRetailAgent(ctx, openai) {
     try {
         const productCatalog = ctx.productCatalog;
         const activePromotions = ctx.activePromotions || ctx.promotions;
-        const storeProfile = ctx.storeProfile || ctx.businessProfile;
+        const storeProfile = ctx.storeProfile || ctx.businessProfile || {};
+        const businessAlias = storeProfile.businessAlias ||
+            ctx.businessAlias ||
+            null;
         const incomingMedia = ctx.incomingMedia || ctx.media;
         const retailState = ctx.retailConversationState || ctx.conversationState;
         const catalogText = formatCatalogForPrompt(productCatalog);
         const promosText = formatPromosForPrompt(activePromotions);
-        const storeText = formatStoreProfileForPrompt(storeProfile);
+        const storeText = businessAlias
+            ? `Alias/CBU para transferencias: ${businessAlias}`
+            : formatStoreProfileForPrompt(storeProfile);
         const mediaText = formatMediaForPrompt(incomingMedia);
-        const userPrompt = buildAgentPrompt(ctx, catalogText, promosText, {
-            storeText,
-            mediaText,
-            retailState,
-        });
+        const userPrompt = buildAgentPrompt(ctx, catalogText, promosText, storeText, mediaText, retailState);
         const completion = await openai.chat.completions.create({
             model: process.env.OPENAI_COMMERCE_MODEL || DEFAULT_MODEL,
             messages: [
@@ -139,7 +141,7 @@ async function runRetailAgent(ctx, openai) {
         return null;
     }
 }
-function buildAgentPrompt(ctx, catalogText, promosText, parts) {
+function buildAgentPrompt(ctx, catalogText, promosText, storeText, mediaText, retailState) {
     var _a, _b, _c;
     const pending = (_a = ctx.pendingOrders) === null || _a === void 0 ? void 0 : _a[0];
     const pendingSingleText = pending
@@ -169,10 +171,10 @@ Promos activas:
 ${promosText}
 
 Info del negocio (si existe):
-${parts.storeText}
+${storeText}
 
 Media entrante (si existe):
-${parts.mediaText}
+${mediaText}
 
 Pedidos pendientes actuales:
 ${pendingText || "No hay pedidos pendientes."}
@@ -192,9 +194,10 @@ Historial reciente:
 ${recent || "Sin historial previo."}
 
 Estado conversacional retail (si existe):
-${parts.retailState ? JSON.stringify(parts.retailState).slice(0, 800) : "(sin estado)"}
+${retailState ? JSON.stringify(retailState).slice(0, 800) : "(sin estado)"}
 
 Recordá:
+- Si preguntan cómo pagar/transferir, devolvé el alias/cbu del negocio.
 - En action.items poné SOLO lo que el cliente mencionó en ESTE mensaje. No repitas items anteriores.
 - Devolvé solo JSON con "reply" y "action".
 `;

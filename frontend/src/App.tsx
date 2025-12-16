@@ -144,6 +144,7 @@ type Doctor = {
   availabilityStatus?: DoctorAvailabilityStatus;
   profileImageUrl?: string | null;
   ticketLogoUrl?: string | null;
+  businessAlias?: string | null;
 };
 
 type PatientTag = {
@@ -639,6 +640,7 @@ const defaultProfileForm = {
   specialty: "",
   clinicName: "",
   clinicAddress: "",
+  businessAlias: "",
   ticketLogoUrl: "",
   officeDays: "",
   officeDaysSelection: [] as string[],
@@ -5374,6 +5376,7 @@ const automationAppointmentPool = useMemo(() => {
             specialty: json.specialty ?? "",
             clinicName: json.clinicName ?? "",
             clinicAddress: json.officeAddress ?? "",
+            businessAlias: json.businessAlias ?? "",
             ticketLogoUrl: json.ticketLogoUrl ?? prev.ticketLogoUrl ?? "",
             officeDays: json.officeDays ?? "",
             officeDaysSelection:
@@ -8067,6 +8070,7 @@ const automationAppointmentPool = useMemo(() => {
         officeHours:
           officeHoursSummary || profileForm.officeHours || null,
         officeAddress: profileForm.clinicAddress || null,
+        businessAlias: profileForm.businessAlias || null,
         contactPhone: profileForm.contactPhone || null,
         consultationPrice: parsePriceInput(profileForm.consultFee),
         emergencyConsultationPrice: parsePriceInput(profileForm.emergencyFee),
@@ -10440,19 +10444,36 @@ return (
                     />
                   </div>
 
-                  <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1">
-                      Teléfono / WhatsApp de contacto
-                    </label>
-                    <input
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">
+                    Teléfono / WhatsApp de contacto
+                  </label>
+                  <input
                       type="text"
                       name="contactPhone"
                       value={profileForm.contactPhone}
                       onChange={handleProfileChange}
                       placeholder="+54 9 ..."
-                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900/5"
-                    />
-                  </div>
+                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900/5"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">
+                    Alias o CBU del negocio
+                  </label>
+                  <input
+                    type="text"
+                    name="businessAlias"
+                    value={profileForm.businessAlias}
+                    onChange={handleProfileChange}
+                    placeholder="ej: mi.negocio.mp / CBU"
+                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900/5"
+                  />
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    Se usará para compartir los datos de transferencia a tus clientes.
+                  </p>
+                </div>
 
                   {doctor.businessType === "HEALTH" && (
                     <div>
@@ -12448,11 +12469,7 @@ return (
                                   <button
                                     type="button"
                                     className="btn btn-outline btn-sm"
-                                    onClick={async () => {
-                                      await fetchOrders();
-                                      setActiveSection("orders");
-                                      setTimeout(() => setOrderModalId(order.id), 0);
-                                    }}
+                                    onClick={() => setOrderModalId(order.id)}
                                   >
                                     Ver pedido
                                   </button>
