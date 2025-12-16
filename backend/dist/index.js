@@ -3038,6 +3038,11 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                             const dhash = (media.contentType || "").toLowerCase().startsWith("image/")
                                 ? await (0, proofExtractor_1.imageDhashHex)(buffer)
                                 : null;
+                            const ext = (0, proofExtractor_1.guessExt)(media.contentType);
+                            const proofFilename = `proof-${Date.now()}-${i}.${ext}`;
+                            const proofPath = path_1.default.join(ORDER_UPLOADS_DIR, proofFilename);
+                            await fsp.writeFile(proofPath, buffer);
+                            const fileUrl = `/uploads/orders/${proofFilename}`;
                             const duplicateExact = await prisma_1.prisma.paymentProof.findFirst({
                                 where: { doctorId: doctor.id, bytesSha256: hash },
                                 orderBy: { createdAt: "desc" },
@@ -3089,6 +3094,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                                     mediaIndex: i,
                                     fileName: media.mediaSid || undefined,
                                     contentType: media.contentType || null,
+                                    fileUrl,
                                     bytesSha256: hash,
                                     imageDhash: dhash,
                                     amount: (_d = extraction === null || extraction === void 0 ? void 0 : extraction.amount) !== null && _d !== void 0 ? _d : null,

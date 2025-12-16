@@ -156,6 +156,7 @@ model PaymentProof {
   mediaIndex    Int?
   fileName      String?
   contentType   String?
+  fileUrl       String?
   bytesSha256   String
   imageDhash    String?
   amount        Int?

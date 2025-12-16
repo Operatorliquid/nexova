@@ -68,7 +68,7 @@ export async function imageDhashHex(buf: Buffer): Promise<string | null> {
   }
 }
 
-function guessExt(contentType?: string | null) {
+export function guessExt(contentType?: string | null) {
   const ct = (contentType || "").toLowerCase();
   if (ct.includes("pdf")) return "pdf";
   if (ct.includes("png")) return "png";
@@ -126,6 +126,11 @@ Reglas:
 - Si ves formato argentino (1.234,56) interpretalo bien.
 `;
 
+  const imageUrlData =
+    isPdf && contentType.toLowerCase().includes("pdf")
+      ? null
+      : `data:${contentType};base64,${buffer.toString("base64")}`;
+
   const resp = await openai.responses.create({
     model: process.env.OPENAI_PROOF_MODEL || "gpt-4.1-mini",
     input: [
@@ -135,7 +140,7 @@ Reglas:
           { type: "input_text", text: prompt },
           isPdf
             ? { type: "input_file", file_id: uploaded.id }
-            : { type: "input_image", image_url: uploaded.id, detail: "auto" },
+            : { type: "input_image", image_url: imageUrlData!, detail: "auto" },
         ],
       },
     ],

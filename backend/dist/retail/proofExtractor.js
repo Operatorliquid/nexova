@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.downloadTwilioMedia = downloadTwilioMedia;
 exports.sha256 = sha256;
 exports.imageDhashHex = imageDhashHex;
+exports.guessExt = guessExt;
 exports.extractProofWithOpenAI = extractProofWithOpenAI;
 const crypto_1 = __importDefault(require("crypto"));
 const axios_1 = __importDefault(require("axios"));
@@ -110,6 +111,9 @@ Reglas:
 - Si no estás seguro, poné null y baja confidence.
 - Si ves formato argentino (1.234,56) interpretalo bien.
 `;
+    const imageUrlData = isPdf && contentType.toLowerCase().includes("pdf")
+        ? null
+        : `data:${contentType};base64,${buffer.toString("base64")}`;
     const resp = await openai.responses.create({
         model: process.env.OPENAI_PROOF_MODEL || "gpt-4.1-mini",
         input: [
@@ -119,7 +123,7 @@ Reglas:
                     { type: "input_text", text: prompt },
                     isPdf
                         ? { type: "input_file", file_id: uploaded.id }
-                        : { type: "input_image", image_url: uploaded.id, detail: "auto" },
+                        : { type: "input_image", image_url: imageUrlData, detail: "auto" },
                 ],
             },
         ],

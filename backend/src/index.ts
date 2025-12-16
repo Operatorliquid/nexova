@@ -57,6 +57,7 @@ import {
   extractProofWithOpenAI,
   imageDhashHex,
   sha256,
+  guessExt,
 } from "./retail/proofExtractor";
 
 const app = express();
@@ -3864,6 +3865,11 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
                 (media.contentType || "").toLowerCase().startsWith("image/")
                   ? await imageDhashHex(buffer)
                   : null;
+              const ext = guessExt(media.contentType);
+              const proofFilename = `proof-${Date.now()}-${i}.${ext}`;
+              const proofPath = path.join(ORDER_UPLOADS_DIR, proofFilename);
+              await fsp.writeFile(proofPath, buffer);
+              const fileUrl = `/uploads/orders/${proofFilename}`;
 
               const duplicateExact = await prisma.paymentProof.findFirst({
                 where: { doctorId: doctor.id, bytesSha256: hash },
@@ -3925,6 +3931,7 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
                   mediaIndex: i,
                   fileName: media.mediaSid || undefined,
                   contentType: media.contentType || null,
+                  fileUrl,
                   bytesSha256: hash,
                   imageDhash: dhash,
                   amount: extraction?.amount ?? null,

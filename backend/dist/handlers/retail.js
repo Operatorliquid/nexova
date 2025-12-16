@@ -190,7 +190,7 @@ async function assignLatestUnassignedProofToOrder(params) {
     const { doctorId, clientId, orderSequenceNumber } = params;
     const target = await prisma_1.prisma.order.findFirst({
         where: { doctorId, clientId, sequenceNumber: orderSequenceNumber },
-        select: { id: true },
+        select: { id: true, totalAmount: true, paidAmount: true },
     });
     if (!target)
         return false;
@@ -204,13 +204,47 @@ async function assignLatestUnassignedProofToOrder(params) {
             createdAt: { gte: tenMinutesAgo },
         },
         orderBy: { createdAt: "desc" },
-        select: { id: true },
+        select: {
+            id: true,
+            fileUrl: true,
+            fileName: true,
+            contentType: true,
+            amount: true,
+        },
     });
     if (!latestProof)
         return false;
-    await prisma_1.prisma.paymentProof.update({
-        where: { id: latestProof.id },
-        data: { orderId: target.id, status: client_1.PaymentProofStatus.assigned },
+    await prisma_1.prisma.$transaction(async (tx) => {
+        var _a, _b;
+        await tx.paymentProof.update({
+            where: { id: latestProof.id },
+            data: { orderId: target.id, status: client_1.PaymentProofStatus.assigned },
+        });
+        if (latestProof.fileUrl) {
+            await tx.orderAttachment.create({
+                data: {
+                    orderId: target.id,
+                    url: latestProof.fileUrl,
+                    filename: latestProof.fileName || "Comprobante",
+                    mimeType: latestProof.contentType || "application/octet-stream",
+                },
+            });
+        }
+        if (latestProof.amount && latestProof.amount > 0) {
+            const nextPaid = ((_a = target.paidAmount) !== null && _a !== void 0 ? _a : 0) + latestProof.amount;
+            const nextStatus = nextPaid <= 0
+                ? "unpaid"
+                : nextPaid >= ((_b = target.totalAmount) !== null && _b !== void 0 ? _b : 0)
+                    ? "paid"
+                    : "partial";
+            await tx.order.update({
+                where: { id: target.id },
+                data: {
+                    paidAmount: nextPaid,
+                    paymentStatus: nextStatus,
+                },
+            });
+        }
     });
     return true;
 }
