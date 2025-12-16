@@ -860,6 +860,18 @@ async function saveOrderAttachmentFile(orderId, fileBase64, originalName) {
         mime,
     };
 }
+async function saveOrderAttachmentBuffer(buffer, mime, originalName) {
+    const extension = (0, proofExtractor_1.guessExt)(mime);
+    const filename = `order-${Date.now()}-${Math.floor(Math.random() * 10000)}.${extension}`;
+    const destination = path_1.default.join(ORDER_UPLOADS_DIR, filename);
+    await fsp.writeFile(destination, buffer);
+    const cleanedName = sanitizeOptionalText(originalName, 120) || `Comprobante ${filename}`;
+    return {
+        url: `/uploads/orders/${filename}`,
+        filename: cleanedName,
+        mime,
+    };
+}
 async function savePromotionImage(doctorId, imageBase64) {
     const { buffer, extension } = parseBase64ImageInput(imageBase64);
     const filename = `promo-${doctorId}-${Date.now()}.${extension}`;
@@ -3039,11 +3051,8 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                             const dhash = (media.contentType || "").toLowerCase().startsWith("image/")
                                 ? await (0, proofExtractor_1.imageDhashHex)(buffer)
                                 : null;
-                            const ext = (0, proofExtractor_1.guessExt)(media.contentType);
-                            const proofFilename = `proof-${Date.now()}-${i}.${ext}`;
-                            const proofPath = path_1.default.join(ORDER_UPLOADS_DIR, proofFilename);
-                            await fsp.writeFile(proofPath, buffer);
-                            const fileUrl = buildPublicUrl(`/uploads/orders/${proofFilename}`);
+                            const savedFile = await saveOrderAttachmentBuffer(buffer, media.contentType || "application/octet-stream", media.mediaSid || "Comprobante");
+                            const fileUrl = savedFile.url;
                             const duplicateExact = await prisma_1.prisma.paymentProof.findFirst({
                                 where: { doctorId: doctor.id, bytesSha256: hash },
                                 orderBy: { createdAt: "desc" },

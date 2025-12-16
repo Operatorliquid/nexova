@@ -1052,6 +1052,23 @@ async function saveOrderAttachmentFile(
   };
 }
 
+async function saveOrderAttachmentBuffer(
+  buffer: Buffer,
+  mime: string,
+  originalName?: string | null
+) {
+  const extension = guessExt(mime);
+  const filename = `order-${Date.now()}-${Math.floor(Math.random() * 10000)}.${extension}`;
+  const destination = path.join(ORDER_UPLOADS_DIR, filename);
+  await fsp.writeFile(destination, buffer);
+  const cleanedName = sanitizeOptionalText(originalName, 120) || `Comprobante ${filename}`;
+  return {
+    url: `/uploads/orders/${filename}`,
+    filename: cleanedName,
+    mime,
+  };
+}
+
 async function savePromotionImage(doctorId: number, imageBase64: string) {
   const { buffer, extension } = parseBase64ImageInput(imageBase64);
   const filename = `promo-${doctorId}-${Date.now()}.${extension}`;
@@ -3866,11 +3883,12 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
                 (media.contentType || "").toLowerCase().startsWith("image/")
                   ? await imageDhashHex(buffer)
                   : null;
-              const ext = guessExt(media.contentType);
-              const proofFilename = `proof-${Date.now()}-${i}.${ext}`;
-              const proofPath = path.join(ORDER_UPLOADS_DIR, proofFilename);
-              await fsp.writeFile(proofPath, buffer);
-              const fileUrl = buildPublicUrl(`/uploads/orders/${proofFilename}`);
+              const savedFile = await saveOrderAttachmentBuffer(
+                buffer,
+                media.contentType || "application/octet-stream",
+                media.mediaSid || "Comprobante"
+              );
+              const fileUrl = savedFile.url;
 
               const duplicateExact = await prisma.paymentProof.findFirst({
                 where: { doctorId: doctor.id, bytesSha256: hash },

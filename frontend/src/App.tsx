@@ -2334,6 +2334,7 @@ const [automationMessages, setAutomationMessages] = useState<
   const [orderModalTab, setOrderModalTab] = useState<"details" | "payments" | "attachments">(
     "details"
   );
+  const [orderModalPrefill, setOrderModalPrefill] = useState<CommerceOrder | null>(null);
   const [orderSearch, setOrderSearch] = useState("");
   const [orderRange, setOrderRange] = useState<"today" | "this_week" | "next_week" | "all">(
     "today"
