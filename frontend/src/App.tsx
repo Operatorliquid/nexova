@@ -2518,6 +2518,87 @@ const [automationMessages, setAutomationMessages] = useState<
   };
   const contactLabels = businessConfig.contactLabels;
   const isMedicalDoctor = businessType === "HEALTH";
+  const selectedPatient =
+    patients.find((p) => p.id === selectedPatientId) || null;
+
+  // Control manual del chat (retail)
+  useEffect(() => {
+    if (!token || businessType !== "RETAIL") {
+      setChatControlHold(false);
+      return;
+    }
+    const phone = selectedPatient?.phone;
+    if (!phone) {
+      setChatControlHold(false);
+      return;
+    }
+    let cancelled = false;
+    const run = async () => {
+      try {
+        setChatControlLoading(true);
+        const res = await fetch(
+          buildApiUrl(`/api/commerce/chat-control?phone=${encodeURIComponent(phone)}`),
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          }
+        );
+        if (!res.ok) throw new Error("No pudimos obtener el estado del chat.");
+        const json = await res.json().catch(() => null);
+        if (!cancelled) {
+          setChatControlHold(Boolean(json?.hold));
+        }
+      } catch (err) {
+        console.error("Error al consultar control de chat:", err);
+        if (!cancelled) setChatControlHold(false);
+      } finally {
+        if (!cancelled) setChatControlLoading(false);
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [token, businessType, selectedPatient?.phone, selectedPatient?.id]);
+
+  const handleToggleChatControl = useCallback(async () => {
+    if (!token || businessType !== "RETAIL") return;
+    const phone = selectedPatient?.phone;
+    if (!phone) return;
+    try {
+      setChatControlLoading(true);
+      const next = !chatControlHold;
+      const res = await fetch(buildApiUrl("/api/commerce/chat-control"), {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ phone, hold: next }),
+      });
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => null);
+        throw new Error(errJson?.error || "No pudimos actualizar el control del chat.");
+      }
+      const json = await res.json().catch(() => null);
+      setChatControlHold(Boolean(json?.hold ?? next));
+      setNotification({
+        type: "success",
+        message: next ? "Tomaste el control de este chat." : "El bot vuelve a responder este chat.",
+      });
+      setTimeout(() => setNotification(null), 3000);
+    } catch (err: any) {
+      console.error("Error al alternar control del chat:", err);
+      setNotification({
+        type: "error",
+        message: err?.message || "No pudimos actualizar el control del chat.",
+      });
+      setTimeout(() => setNotification(null), 3500);
+    } finally {
+      setChatControlLoading(false);
+    }
+  }, [token, businessType, selectedPatient?.phone, chatControlHold]);
   const sidebarSections = businessConfig.sidebarSections;
   const canAccessStock = useMemo(
     () => sidebarSections.some((section) => section.key === "stock"),
@@ -8244,90 +8325,11 @@ const automationAppointmentPool = useMemo(() => {
     );
   }
 
-  const selectedPatient =
-    patients.find((p) => p.id === selectedPatientId) || null;
   const clinicalHistoryPatient = clinicalHistorySnapshot?.patient ?? null;
   const clinicalHistoryConsultations =
     clinicalHistorySnapshot?.consultations ?? [];
 
   // Control manual del chat (retail)
-  useEffect(() => {
-    if (!token || !isRetailBusiness) {
-      setChatControlHold(false);
-      return;
-    }
-    const phone = selectedPatient?.phone;
-    if (!phone) {
-      setChatControlHold(false);
-      return;
-    }
-    let cancelled = false;
-    const run = async () => {
-      try {
-        setChatControlLoading(true);
-        const res = await fetch(
-          buildApiUrl(`/api/commerce/chat-control?phone=${encodeURIComponent(phone)}`),
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
-          }
-        );
-        if (!res.ok) throw new Error("No pudimos obtener el estado del chat.");
-        const json = await res.json().catch(() => null);
-        if (!cancelled) {
-          setChatControlHold(Boolean(json?.hold));
-        }
-      } catch (err) {
-        console.error("Error al consultar control de chat:", err);
-        if (!cancelled) setChatControlHold(false);
-      } finally {
-        if (!cancelled) setChatControlLoading(false);
-      }
-    };
-    run();
-    return () => {
-      cancelled = true;
-    };
-  }, [token, isRetailBusiness, selectedPatient?.phone, selectedPatient?.id]);
-
-  const handleToggleChatControl = useCallback(async () => {
-    if (!token || !isRetailBusiness) return;
-    const phone = selectedPatient?.phone;
-    if (!phone) return;
-    try {
-      setChatControlLoading(true);
-      const next = !chatControlHold;
-      const res = await fetch(buildApiUrl("/api/commerce/chat-control"), {
-        method: "PATCH",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ phone, hold: next }),
-      });
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => null);
-        throw new Error(errJson?.error || "No pudimos actualizar el control del chat.");
-      }
-      const json = await res.json().catch(() => null);
-      setChatControlHold(Boolean(json?.hold ?? next));
-      setNotification({
-        type: "success",
-        message: next ? "Tomaste el control de este chat." : "El bot vuelve a responder este chat.",
-      });
-      setTimeout(() => setNotification(null), 3000);
-    } catch (err: any) {
-      console.error("Error al alternar control del chat:", err);
-      setNotification({
-        type: "error",
-        message: err?.message || "No pudimos actualizar el control del chat.",
-      });
-      setTimeout(() => setNotification(null), 3500);
-    } finally {
-      setChatControlLoading(false);
-    }
-  }, [token, isRetailBusiness, selectedPatient?.phone, chatControlHold]);
   const sidebarProps = {
     activeSection,
     onChangeSection: handleSidebarSectionChange,
