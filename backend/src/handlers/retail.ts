@@ -3,7 +3,7 @@ import { sendWhatsAppText } from "../whatsapp";
 import { appendMenuHintForBusiness } from "../utils/hints";
 import { matchProductName, upsertRetailOrder } from "../utils/retail";
 import { normalizeDniInput } from "../utils/text";
-import type { Patient, RetailClient } from "@prisma/client";
+import { PaymentProofStatus, type Patient, type RetailClient } from "@prisma/client";
 
 const norm = (s: string) =>
   (s || "")
@@ -209,7 +209,7 @@ function parseProofCandidateFromLastBotMessage(lastBotMsg: string): number | nul
 // Estado en memoria para "estoy esperando #pedido para asignar comprobante"
 const awaitingProofMap = new Map<string, number>();
 
-async function assignLatestUnassignedProofToOrder(params: {
+export async function assignLatestUnassignedProofToOrder(params: {
   doctorId: number;
   clientId: number;
   orderSequenceNumber: number;
@@ -222,34 +222,40 @@ async function assignLatestUnassignedProofToOrder(params: {
   if (!target) return false;
 
   const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
-  const latestAtt = await prisma.orderAttachment.findFirst({
+  const latestProof = await prisma.paymentProof.findFirst({
     where: {
-      order: { doctorId, clientId },
+      doctorId,
+      clientId,
+      orderId: null,
+      status: PaymentProofStatus.unassigned,
       createdAt: { gte: tenMinutesAgo },
     },
     orderBy: { createdAt: "desc" },
-    select: { id: true, orderId: true },
+    select: { id: true },
   });
 
-  if (!latestAtt) return false;
+  if (!latestProof) return false;
 
-  await prisma.orderAttachment.update({
-    where: { id: latestAtt.id },
-    data: { orderId: target.id },
+  await prisma.paymentProof.update({
+    where: { id: latestProof.id },
+    data: { orderId: target.id, status: PaymentProofStatus.assigned },
   });
 
   return true;
 }
 
-async function setAwaitingProofOrderNumber(params: { doctorId: number; clientId: number }) {
+export async function setAwaitingProofOrderNumber(params: { doctorId: number; clientId: number }) {
   awaitingProofMap.set(`${params.doctorId}:${params.clientId}`, Date.now());
 }
 
-async function clearAwaitingProofOrderNumber(params: { doctorId: number; clientId: number }) {
+export async function clearAwaitingProofOrderNumber(params: {
+  doctorId: number;
+  clientId: number;
+}) {
   awaitingProofMap.delete(`${params.doctorId}:${params.clientId}`);
 }
 
-async function getAwaitingProofOrderNumber(params: {
+export async function getAwaitingProofOrderNumber(params: {
   doctorId: number;
   clientId: number;
 }): Promise<boolean> {

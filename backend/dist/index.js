@@ -26,6 +26,7 @@ const health_1 = require("./handlers/health");
 const retail_2 = require("./utils/retail");
 const hints_1 = require("./utils/hints");
 const automationRetail_1 = require("./agents/automationRetail");
+const proofExtractor_1 = require("./retail/proofExtractor");
 const app = (0, express_1.default)();
 const UPLOADS_DIR = path_1.default.join(__dirname, "..", "uploads");
 const DOCTOR_UPLOADS_DIR = path_1.default.join(UPLOADS_DIR, "doctors");
@@ -54,6 +55,7 @@ const allowAnyOrigin = CORS_ORIGINS.includes("*");
 const automationOpenAIClient = process.env.OPENAI_API_KEY
     ? new openai_1.default({ apiKey: process.env.OPENAI_API_KEY })
     : null;
+const MIN_DHASH_SIMILARITY = 10; // hamming distance threshold
 // Habilitamos CORS para que el frontend (localhost:5173) pueda hablar con este backend
 app.use((0, cors_1.default)({
     origin: (origin, callback) => {
@@ -2889,7 +2891,7 @@ app.get("/api/whatsapp/webhook", (_req, res) => {
     res.sendStatus(200);
 });
 app.post("/api/whatsapp/webhook", async (req, res) => {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _0, _1, _2, _3;
     try {
         if (!validateTwilioSignature(req)) {
             return res.status(403).send("Invalid signature");
@@ -3017,43 +3019,119 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                 console.log("[Retail] Chat en control manual, sin respuesta automática.");
                 return res.sendStatus(200);
             }
-            // Si llegan comprobantes/medios, los guardamos como adjuntos al pedido más reciente
+            // Si llegan comprobantes/medios, procesar y preguntar asignación
             if (mediaItems.length > 0) {
                 try {
-                    const targetOrder = (await prisma_1.prisma.order.findFirst({
-                        where: { doctorId: doctor.id, clientId: retailClient.id },
-                        orderBy: { createdAt: "desc" },
-                    })) || null;
-                    if (targetOrder) {
-                        for (const media of mediaItems) {
-                            if (!media.url)
-                                continue;
-                            try {
-                                // Descargamos el binario desde Twilio (requiere auth)
-                                const mediaRes = await axios_1.default.get(media.url, {
-                                    responseType: "arraybuffer",
-                                    auth: {
-                                        username: TWILIO_ACCOUNT_SID,
-                                        password: TWILIO_AUTH_TOKEN,
+                    const candidateOrder = pendingOrdersForCtx[0] ||
+                        (await prisma_1.prisma.order.findFirst({
+                            where: { doctorId: doctor.id, clientId: retailClient.id },
+                            orderBy: { createdAt: "desc" },
+                        }));
+                    const candidateSeq = (_b = candidateOrder === null || candidateOrder === void 0 ? void 0 : candidateOrder.sequenceNumber) !== null && _b !== void 0 ? _b : null;
+                    for (let i = 0; i < mediaItems.length; i += 1) {
+                        const media = mediaItems[i];
+                        if (!media.url)
+                            continue;
+                        try {
+                            const buffer = await (0, proofExtractor_1.downloadTwilioMedia)(media.url);
+                            const hash = (0, proofExtractor_1.sha256)(buffer);
+                            const dhash = (media.contentType || "").toLowerCase().startsWith("image/")
+                                ? await (0, proofExtractor_1.imageDhashHex)(buffer)
+                                : null;
+                            const duplicateExact = await prisma_1.prisma.paymentProof.findFirst({
+                                where: { doctorId: doctor.id, bytesSha256: hash },
+                                orderBy: { createdAt: "desc" },
+                            });
+                            let duplicateOfId = (_c = duplicateExact === null || duplicateExact === void 0 ? void 0 : duplicateExact.id) !== null && _c !== void 0 ? _c : null;
+                            if (!duplicateOfId && dhash) {
+                                const candidates = await prisma_1.prisma.paymentProof.findMany({
+                                    where: {
+                                        doctorId: doctor.id,
+                                        imageDhash: { not: null },
                                     },
+                                    select: { id: true, imageDhash: true },
+                                    orderBy: { createdAt: "desc" },
+                                    take: 40,
                                 });
-                                const contentType = media.contentType || mediaRes.headers["content-type"] || "image/jpeg";
-                                const base64 = Buffer.from(mediaRes.data).toString("base64");
-                                const dataUri = `data:${contentType};base64,${base64}`;
-                                const filename = media.mediaSid ? `Twilio-${media.mediaSid}` : "Comprobante WhatsApp";
-                                const saved = await saveOrderAttachmentFile(targetOrder.id, dataUri, filename);
-                                await prisma_1.prisma.orderAttachment.create({
-                                    data: {
-                                        orderId: targetOrder.id,
-                                        url: saved.url,
-                                        filename: saved.filename,
-                                        mimeType: saved.mime,
-                                    },
+                                const hammingHex = (a, b) => {
+                                    const len = Math.min(a.length, b.length);
+                                    let diff = 0;
+                                    for (let j = 0; j < len; j += 1) {
+                                        const na = parseInt(a[j], 16);
+                                        const nb = parseInt(b[j], 16);
+                                        if (Number.isNaN(na) || Number.isNaN(nb))
+                                            continue;
+                                        diff += (na ^ nb).toString(2).split("1").length - 1;
+                                    }
+                                    return diff;
+                                };
+                                const similar = candidates.find((c) => c.imageDhash && hammingHex(dhash, c.imageDhash) <= MIN_DHASH_SIMILARITY);
+                                if (similar)
+                                    duplicateOfId = similar.id;
+                            }
+                            const extraction = automationOpenAIClient && media.contentType
+                                ? await (0, proofExtractor_1.extractProofWithOpenAI)({
+                                    openai: automationOpenAIClient,
+                                    buffer,
+                                    contentType: media.contentType || "application/octet-stream",
+                                    fileName: media.mediaSid || undefined,
+                                })
+                                : null;
+                            const proofDate = (extraction === null || extraction === void 0 ? void 0 : extraction.dateISO) && !Number.isNaN(Date.parse(extraction.dateISO))
+                                ? new Date(extraction.dateISO)
+                                : null;
+                            await prisma_1.prisma.paymentProof.create({
+                                data: {
+                                    doctorId: doctor.id,
+                                    clientId: retailClient.id,
+                                    orderId: null,
+                                    messageSid: payload.MessageSid || null,
+                                    mediaIndex: i,
+                                    fileName: media.mediaSid || undefined,
+                                    contentType: media.contentType || null,
+                                    bytesSha256: hash,
+                                    imageDhash: dhash,
+                                    amount: (_d = extraction === null || extraction === void 0 ? void 0 : extraction.amount) !== null && _d !== void 0 ? _d : null,
+                                    currency: (_e = extraction === null || extraction === void 0 ? void 0 : extraction.currency) !== null && _e !== void 0 ? _e : null,
+                                    reference: (_f = extraction === null || extraction === void 0 ? void 0 : extraction.reference) !== null && _f !== void 0 ? _f : null,
+                                    proofDate,
+                                    status: duplicateOfId ? "duplicate" : "unassigned",
+                                    duplicateOfId: duplicateOfId !== null && duplicateOfId !== void 0 ? duplicateOfId : undefined,
+                                },
+                            });
+                            const amountText = (extraction === null || extraction === void 0 ? void 0 : extraction.amount) != null ? `$${extraction.amount}` : null;
+                            const reply = duplicateOfId
+                                ? candidateSeq
+                                    ? `Ojo, este comprobante parece repetido. ${amountText ? `Detecté ${amountText}. ` : ""}¿Lo asigno igual al pedido #${candidateSeq}?`
+                                    : `Ojo, este comprobante parece repetido. ${amountText ? `Detecté ${amountText}. ` : ""}¿Para qué pedido es? Decime el número (ej: 6).`
+                                : candidateSeq
+                                    ? `Recibí tu comprobante ✅${amountText ? ` Detecté ${amountText}.` : ""} ¿Es para el pedido #${candidateSeq}?`
+                                    : `Recibí tu comprobante ✅${amountText ? ` Detecté ${amountText}.` : ""} ¿Para qué pedido es? Decime el número (ej: 6).`;
+                            if (!candidateSeq) {
+                                await (0, retail_1.setAwaitingProofOrderNumber)({
+                                    doctorId: doctor.id,
+                                    clientId: retailClient.id,
                                 });
                             }
-                            catch (err) {
-                                console.warn("[Retail] No se pudo guardar media entrante:", err);
-                            }
+                            const waResult = await (0, whatsapp_1.sendWhatsAppText)(phoneE164, reply, doctorWhatsappConfig);
+                            await prisma_1.prisma.message.create({
+                                data: {
+                                    waMessageId: (_g = waResult === null || waResult === void 0 ? void 0 : waResult.sid) !== null && _g !== void 0 ? _g : null,
+                                    from: doctorNumber,
+                                    to: phoneE164,
+                                    direction: "outgoing",
+                                    type: "text",
+                                    body: reply,
+                                    rawPayload: waResult,
+                                    retailClientId: retailClient.id,
+                                    doctorId: doctor.id,
+                                },
+                            });
+                            // respondemos una sola vez por tanda de media
+                            return res.sendStatus(200);
+                        }
+                        catch (err) {
+                            console.warn("[Retail] No se pudo procesar media entrante:", err);
                         }
                     }
                 }
@@ -3071,7 +3149,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                     const waResult = await (0, whatsapp_1.sendWhatsAppText)(phoneE164, responseText, doctorWhatsappConfig);
                     await prisma_1.prisma.message.create({
                         data: {
-                            waMessageId: (_b = waResult === null || waResult === void 0 ? void 0 : waResult.sid) !== null && _b !== void 0 ? _b : null,
+                            waMessageId: (_h = waResult === null || waResult === void 0 ? void 0 : waResult.sid) !== null && _h !== void 0 ? _h : null,
                             from: doctorNumber,
                             to: phoneE164,
                             direction: "outgoing",
@@ -3166,8 +3244,8 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
             console.log("[RETAIL_CTX]", {
                 catalog: Array.isArray(agentCtx.productCatalog) ? agentCtx.productCatalog.length : 0,
                 promos: Array.isArray(agentCtx.activePromotions) ? agentCtx.activePromotions.length : 0,
-                media: (_d = (_c = agentCtx.incomingMedia) === null || _c === void 0 ? void 0 : _c.count) !== null && _d !== void 0 ? _d : 0,
-                pending: (_e = agentCtx.pendingOrders) === null || _e === void 0 ? void 0 : _e.map((o) => ({ n: o.sequenceNumber, s: o.status, items: o.items.length })),
+                media: (_k = (_j = agentCtx.incomingMedia) === null || _j === void 0 ? void 0 : _j.count) !== null && _k !== void 0 ? _k : 0,
+                pending: (_l = agentCtx.pendingOrders) === null || _l === void 0 ? void 0 : _l.map((o) => ({ n: o.sequenceNumber, s: o.status, items: o.items.length })),
             });
             const agentResult = await (0, ai_1.runWhatsappAgent)(agentCtx);
             if (!agentResult)
@@ -3175,14 +3253,14 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
             if (agentResult.profileUpdates) {
                 const info = agentResult.profileUpdates;
                 const update = {};
-                if ((_f = info.name) === null || _f === void 0 ? void 0 : _f.trim())
+                if ((_m = info.name) === null || _m === void 0 ? void 0 : _m.trim())
                     update.fullName = info.name.trim().slice(0, 120);
                 if (info.dni) {
                     const normalized = normalizeDniInput(info.dni);
                     if (normalized)
                         update.dni = normalized;
                 }
-                if ((_g = info.address) === null || _g === void 0 ? void 0 : _g.trim()) {
+                if ((_o = info.address) === null || _o === void 0 ? void 0 : _o.trim()) {
                     const addr = info.address.trim();
                     if (addr.length >= 5)
                         update.businessAddress = addr.slice(0, 160);
@@ -3214,7 +3292,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                     const waResult = await (0, whatsapp_1.sendWhatsAppText)(phoneE164, messageWithHint, doctorWhatsappConfig);
                     await prisma_1.prisma.message.create({
                         data: {
-                            waMessageId: (_h = waResult === null || waResult === void 0 ? void 0 : waResult.sid) !== null && _h !== void 0 ? _h : null,
+                            waMessageId: (_p = waResult === null || waResult === void 0 ? void 0 : waResult.sid) !== null && _p !== void 0 ? _p : null,
                             from: doctorNumber,
                             to: phoneE164,
                             direction: "outgoing",
@@ -3273,7 +3351,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                 const waResult = await (0, whatsapp_1.sendWhatsAppText)(phoneE164, responseText, doctorWhatsappConfig);
                 await prisma_1.prisma.message.create({
                     data: {
-                        waMessageId: (_j = waResult === null || waResult === void 0 ? void 0 : waResult.sid) !== null && _j !== void 0 ? _j : null,
+                        waMessageId: (_q = waResult === null || waResult === void 0 ? void 0 : waResult.sid) !== null && _q !== void 0 ? _q : null,
                         from: doctorNumber,
                         to: phoneE164,
                         direction: "outgoing",
@@ -3312,7 +3390,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                 const waResult = await (0, whatsapp_1.sendWhatsAppText)(phoneE164, responseText, doctorWhatsappConfig);
                 await prisma_1.prisma.message.create({
                     data: {
-                        waMessageId: (_k = waResult === null || waResult === void 0 ? void 0 : waResult.sid) !== null && _k !== void 0 ? _k : null,
+                        waMessageId: (_r = waResult === null || waResult === void 0 ? void 0 : waResult.sid) !== null && _r !== void 0 ? _r : null,
                         from: doctorNumber,
                         to: phoneE164,
                         direction: "outgoing",
@@ -3405,7 +3483,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                     birthDate: patient.birthDate ? patient.birthDate.toISOString() : null,
                     address: patient.address,
                     conversationState: patient.conversationState,
-                    conversationStateData: (_l = patient.conversationStateData) !== null && _l !== void 0 ? _l : undefined,
+                    conversationStateData: (_s = patient.conversationStateData) !== null && _s !== void 0 ? _s : undefined,
                     needsDni: patient.needsDni,
                     needsName: patient.needsName,
                     needsBirthDate: patient.needsBirthDate,
@@ -3510,7 +3588,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                     timezone: DEFAULT_TIMEZONE,
                     fallbackReply: outgoingMessage,
                 });
-                patient = (_m = bookingOutcome.patient) !== null && _m !== void 0 ? _m : patient;
+                patient = (_t = bookingOutcome.patient) !== null && _t !== void 0 ? _t : patient;
                 outgoingMessage = bookingOutcome.message;
             }
             else if (flowResult.cancelRequest) {
@@ -3520,7 +3598,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                     cancelRequest: flowResult.cancelRequest,
                     fallbackReply: outgoingMessage,
                 });
-                patient = (_o = cancelOutcome.patient) !== null && _o !== void 0 ? _o : patient;
+                patient = (_u = cancelOutcome.patient) !== null && _u !== void 0 ? _u : patient;
                 outgoingMessage = cancelOutcome.message;
             }
             if (outgoingMessage) {
@@ -3541,21 +3619,21 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
             const n = Number(cleaned);
             return Number.isFinite(n) ? n : null;
         };
-        const consultationPrice = parsePrice((_p = doctor.consultFee) !== null && _p !== void 0 ? _p : null);
-        const emergencyConsultationPrice = parsePrice((_q = doctor.emergencyFee) !== null && _q !== void 0 ? _q : null);
+        const consultationPrice = parsePrice((_v = doctor.consultFee) !== null && _v !== void 0 ? _v : null);
+        const emergencyConsultationPrice = parsePrice((_w = doctor.emergencyFee) !== null && _w !== void 0 ? _w : null);
         const patientProfilePayload = {
-            consultReason: (_r = patient.consultReason) !== null && _r !== void 0 ? _r : null,
+            consultReason: (_x = patient.consultReason) !== null && _x !== void 0 ? _x : null,
             pendingSlotISO: patient.pendingSlotISO
                 ? patient.pendingSlotISO.toISOString()
                 : null,
-            pendingSlotHumanLabel: (_s = patient.pendingSlotHumanLabel) !== null && _s !== void 0 ? _s : null,
+            pendingSlotHumanLabel: (_y = patient.pendingSlotHumanLabel) !== null && _y !== void 0 ? _y : null,
             pendingSlotExpiresAt: patient.pendingSlotExpiresAt
                 ? patient.pendingSlotExpiresAt.toISOString()
                 : null,
-            pendingSlotReason: (_t = patient.pendingSlotReason) !== null && _t !== void 0 ? _t : null,
-            dni: (_u = patient.dni) !== null && _u !== void 0 ? _u : null,
+            pendingSlotReason: (_z = patient.pendingSlotReason) !== null && _z !== void 0 ? _z : null,
+            dni: (_0 = patient.dni) !== null && _0 !== void 0 ? _0 : null,
             birthDate: patient.birthDate ? patient.birthDate.toISOString() : null,
-            address: (_v = patient.address) !== null && _v !== void 0 ? _v : null,
+            address: (_1 = patient.address) !== null && _1 !== void 0 ? _1 : null,
             needsDni: patient.needsDni,
             needsName: patient.needsName,
             needsBirthDate: patient.needsBirthDate,
@@ -3634,7 +3712,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                         });
                     }
                     catch (error) {
-                        if ((error === null || error === void 0 ? void 0 : error.code) === "P2002" && ((_w = error === null || error === void 0 ? void 0 : error.meta) === null || _w === void 0 ? void 0 : _w.modelName) === "Patient") {
+                        if ((error === null || error === void 0 ? void 0 : error.code) === "P2002" && ((_2 = error === null || error === void 0 ? void 0 : error.meta) === null || _2 === void 0 ? void 0 : _2.modelName) === "Patient") {
                             console.warn("[RetailAgent] DNI en uso, omitiendo actualización del paciente");
                         }
                         else {
@@ -3682,7 +3760,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                     const waResult = await (0, whatsapp_1.sendWhatsAppText)(phoneE164, messageWithHint, doctorWhatsappConfig);
                     await prisma_1.prisma.message.create({
                         data: {
-                            waMessageId: (_x = waResult === null || waResult === void 0 ? void 0 : waResult.sid) !== null && _x !== void 0 ? _x : null,
+                            waMessageId: (_3 = waResult === null || waResult === void 0 ? void 0 : waResult.sid) !== null && _3 !== void 0 ? _3 : null,
                             from: doctorNumber,
                             to: phoneE164,
                             direction: "outgoing",

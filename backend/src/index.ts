@@ -37,7 +37,10 @@ import {
   ConversationStateData,
   MenuTemplate,
 } from "./conversation/types";
-import { handleRetailAgentAction } from "./handlers/retail";
+import {
+  handleRetailAgentAction,
+  setAwaitingProofOrderNumber,
+} from "./handlers/retail";
 import { handleHealthWebhookMessage } from "./handlers/health";
 import {
   ensureRetailClientForPhone,
@@ -49,6 +52,12 @@ import {
 } from "./utils/retail";
 import { appendMenuHintForBusiness, appendMenuHint } from "./utils/hints";
 import { runRetailAutomationAgent } from "./agents/automationRetail";
+import {
+  downloadTwilioMedia,
+  extractProofWithOpenAI,
+  imageDhashHex,
+  sha256,
+} from "./retail/proofExtractor";
 
 const app = express();
 
@@ -81,6 +90,7 @@ const allowAnyOrigin = CORS_ORIGINS.includes("*");
 const automationOpenAIClient = process.env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
   : null;
+const MIN_DHASH_SIMILARITY = 10; // hamming distance threshold
 
 // Habilitamos CORS para que el frontend (localhost:5173) pueda hablar con este backend
 app.use(
@@ -3831,49 +3841,148 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
         return res.sendStatus(200);
       }
 
-       // Si llegan comprobantes/medios, los guardamos como adjuntos al pedido más reciente
-       if (mediaItems.length > 0) {
-         try {
-           const targetOrder =
-             (await prisma.order.findFirst({
-               where: { doctorId: doctor.id, clientId: retailClient.id },
-               orderBy: { createdAt: "desc" },
-             })) || null;
+      // Si llegan comprobantes/medios, procesar y preguntar asignación
+      if (mediaItems.length > 0) {
+        try {
+          const candidateOrder =
+            pendingOrdersForCtx[0] ||
+            (await prisma.order.findFirst({
+              where: { doctorId: doctor.id, clientId: retailClient.id },
+              orderBy: { createdAt: "desc" },
+            }));
 
-           if (targetOrder) {
-             for (const media of mediaItems) {
-               if (!media.url) continue;
-               try {
-                 // Descargamos el binario desde Twilio (requiere auth)
-                 const mediaRes = await axios.get(media.url, {
-                   responseType: "arraybuffer",
-                   auth: {
-                     username: TWILIO_ACCOUNT_SID,
-                     password: TWILIO_AUTH_TOKEN,
-                   },
-                 });
-                 const contentType = media.contentType || mediaRes.headers["content-type"] || "image/jpeg";
-                 const base64 = Buffer.from(mediaRes.data).toString("base64");
-                 const dataUri = `data:${contentType};base64,${base64}`;
-                 const filename = media.mediaSid ? `Twilio-${media.mediaSid}` : "Comprobante WhatsApp";
-                 const saved = await saveOrderAttachmentFile(targetOrder.id, dataUri, filename);
-                 await prisma.orderAttachment.create({
-                   data: {
-                     orderId: targetOrder.id,
-                     url: saved.url,
-                     filename: saved.filename,
-                     mimeType: saved.mime,
-                   },
-                 });
-               } catch (err) {
-                 console.warn("[Retail] No se pudo guardar media entrante:", err);
-               }
-             }
-           }
-         } catch (err) {
-           console.warn("[Retail] Error al procesar media entrante:", err);
-         }
-       }
+          const candidateSeq = candidateOrder?.sequenceNumber ?? null;
+
+          for (let i = 0; i < mediaItems.length; i += 1) {
+            const media = mediaItems[i];
+            if (!media.url) continue;
+
+            try {
+              const buffer = await downloadTwilioMedia(media.url);
+              const hash = sha256(buffer);
+              const dhash =
+                (media.contentType || "").toLowerCase().startsWith("image/")
+                  ? await imageDhashHex(buffer)
+                  : null;
+
+              const duplicateExact = await prisma.paymentProof.findFirst({
+                where: { doctorId: doctor.id, bytesSha256: hash },
+                orderBy: { createdAt: "desc" },
+              });
+
+              let duplicateOfId = duplicateExact?.id ?? null;
+
+              if (!duplicateOfId && dhash) {
+                const candidates = await prisma.paymentProof.findMany({
+                  where: {
+                    doctorId: doctor.id,
+                    imageDhash: { not: null },
+                  },
+                  select: { id: true, imageDhash: true },
+                  orderBy: { createdAt: "desc" },
+                  take: 40,
+                });
+
+                const hammingHex = (a: string, b: string) => {
+                  const len = Math.min(a.length, b.length);
+                  let diff = 0;
+                  for (let j = 0; j < len; j += 1) {
+                    const na = parseInt(a[j], 16);
+                    const nb = parseInt(b[j], 16);
+                    if (Number.isNaN(na) || Number.isNaN(nb)) continue;
+                    diff += (na ^ nb).toString(2).split("1").length - 1;
+                  }
+                  return diff;
+                };
+
+                const similar = candidates.find(
+                  (c) => c.imageDhash && hammingHex(dhash, c.imageDhash) <= MIN_DHASH_SIMILARITY
+                );
+                if (similar) duplicateOfId = similar.id;
+              }
+
+              const extraction =
+                automationOpenAIClient && media.contentType
+                  ? await extractProofWithOpenAI({
+                      openai: automationOpenAIClient,
+                      buffer,
+                      contentType: media.contentType || "application/octet-stream",
+                      fileName: media.mediaSid || undefined,
+                    })
+                  : null;
+
+              const proofDate =
+                extraction?.dateISO && !Number.isNaN(Date.parse(extraction.dateISO))
+                  ? new Date(extraction.dateISO)
+                  : null;
+
+              await prisma.paymentProof.create({
+                data: {
+                  doctorId: doctor.id,
+                  clientId: retailClient.id,
+                  orderId: null,
+                  messageSid: payload.MessageSid || null,
+                  mediaIndex: i,
+                  fileName: media.mediaSid || undefined,
+                  contentType: media.contentType || null,
+                  bytesSha256: hash,
+                  imageDhash: dhash,
+                  amount: extraction?.amount ?? null,
+                  currency: extraction?.currency ?? null,
+                  reference: extraction?.reference ?? null,
+                  proofDate,
+                  status: duplicateOfId ? "duplicate" : "unassigned",
+                  duplicateOfId: duplicateOfId ?? undefined,
+                },
+              });
+
+              const amountText =
+                extraction?.amount != null ? `$${extraction.amount}` : null;
+
+              const reply = duplicateOfId
+                ? candidateSeq
+                  ? `Ojo, este comprobante parece repetido. ${amountText ? `Detecté ${amountText}. ` : ""}¿Lo asigno igual al pedido #${candidateSeq}?`
+                  : `Ojo, este comprobante parece repetido. ${amountText ? `Detecté ${amountText}. ` : ""}¿Para qué pedido es? Decime el número (ej: 6).`
+                : candidateSeq
+                ? `Recibí tu comprobante ✅${amountText ? ` Detecté ${amountText}.` : ""} ¿Es para el pedido #${candidateSeq}?`
+                : `Recibí tu comprobante ✅${amountText ? ` Detecté ${amountText}.` : ""} ¿Para qué pedido es? Decime el número (ej: 6).`;
+
+              if (!candidateSeq) {
+                await setAwaitingProofOrderNumber({
+                  doctorId: doctor.id,
+                  clientId: retailClient.id,
+                });
+              }
+
+              const waResult = await sendWhatsAppText(
+                phoneE164,
+                reply,
+                doctorWhatsappConfig
+              );
+              await prisma.message.create({
+                data: {
+                  waMessageId: (waResult as any)?.sid ?? null,
+                  from: doctorNumber,
+                  to: phoneE164,
+                  direction: "outgoing",
+                  type: "text",
+                  body: reply,
+                  rawPayload: waResult,
+                  retailClientId: retailClient.id,
+                  doctorId: doctor.id,
+                },
+              });
+
+              // respondemos una sola vez por tanda de media
+              return res.sendStatus(200);
+            } catch (err) {
+              console.warn("[Retail] No se pudo procesar media entrante:", err);
+            }
+          }
+        } catch (err) {
+          console.warn("[Retail] Error al procesar media entrante:", err);
+        }
+      }
 
       // Disponibilidad general (respeta botones de perfil en retail)
       const doctorAvailabilityStatus = doctor.availabilityStatus || "available";

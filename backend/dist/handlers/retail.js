@@ -1,11 +1,16 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.assignLatestUnassignedProofToOrder = assignLatestUnassignedProofToOrder;
+exports.setAwaitingProofOrderNumber = setAwaitingProofOrderNumber;
+exports.clearAwaitingProofOrderNumber = clearAwaitingProofOrderNumber;
+exports.getAwaitingProofOrderNumber = getAwaitingProofOrderNumber;
 exports.handleRetailAgentAction = handleRetailAgentAction;
 const prisma_1 = require("../prisma");
 const whatsapp_1 = require("../whatsapp");
 const hints_1 = require("../utils/hints");
 const retail_1 = require("../utils/retail");
 const text_1 = require("../utils/text");
+const client_1 = require("@prisma/client");
 const norm = (s) => (s || "")
     .toLowerCase()
     .normalize("NFD")
@@ -190,19 +195,22 @@ async function assignLatestUnassignedProofToOrder(params) {
     if (!target)
         return false;
     const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
-    const latestAtt = await prisma_1.prisma.orderAttachment.findFirst({
+    const latestProof = await prisma_1.prisma.paymentProof.findFirst({
         where: {
-            order: { doctorId, clientId },
+            doctorId,
+            clientId,
+            orderId: null,
+            status: client_1.PaymentProofStatus.unassigned,
             createdAt: { gte: tenMinutesAgo },
         },
         orderBy: { createdAt: "desc" },
-        select: { id: true, orderId: true },
+        select: { id: true },
     });
-    if (!latestAtt)
+    if (!latestProof)
         return false;
-    await prisma_1.prisma.orderAttachment.update({
-        where: { id: latestAtt.id },
-        data: { orderId: target.id },
+    await prisma_1.prisma.paymentProof.update({
+        where: { id: latestProof.id },
+        data: { orderId: target.id, status: client_1.PaymentProofStatus.assigned },
     });
     return true;
 }

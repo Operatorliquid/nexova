@@ -46,6 +46,7 @@ model Doctor {
   retailClientNotes      RetailClientNote[]
   promotions             Promotion[]
   retailClientTags       RetailClientTag[]
+  paymentProofs          PaymentProof[]
 }
 
 enum DoctorAvailabilityStatus {
@@ -83,6 +84,7 @@ model RetailClient {
   messages        Message[]
   notes           RetailClientNote[]
   tags            RetailClientTag[]
+  paymentProofs   PaymentProof[]
 }
 
 model Order {
@@ -108,6 +110,7 @@ model Order {
   items           OrderItem[]
   attachments     OrderAttachment[]
   promotions      Promotion[]   @relation("OrderPromotions")
+  paymentProofs   PaymentProof[]
 }
 
 model RetailClientTag {
@@ -141,6 +144,37 @@ model OrderAttachment {
   createdAt DateTime @default(now())
 }
 
+model PaymentProof {
+  id            Int                @id @default(autoincrement())
+  doctor        Doctor             @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  doctorId      Int
+  client        RetailClient       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  clientId      Int
+  order         Order?             @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId       Int?
+  messageSid    String?
+  mediaIndex    Int?
+  fileName      String?
+  contentType   String?
+  bytesSha256   String
+  imageDhash    String?
+  amount        Int?
+  currency      String?
+  reference     String?
+  proofDate     DateTime?
+  status        PaymentProofStatus @default(unassigned)
+  duplicateOf   PaymentProof?      @relation("PaymentProofDuplicate", fields: [duplicateOfId], references: [id])
+  duplicateOfId Int?
+  duplicates    PaymentProof[]     @relation("PaymentProofDuplicate")
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  @@index([doctorId, clientId])
+  @@index([doctorId, orderId])
+  @@index([bytesSha256])
+  @@index([imageDhash])
+}
+
 model Promotion {
   id               Int      @id @default(autoincrement())
   doctor           Doctor   @relation(fields: [doctorId], references: [id], onDelete: Cascade)
@@ -166,6 +200,13 @@ enum OrderStatus {
   pending
   confirmed
   cancelled
+}
+
+enum PaymentProofStatus {
+  unassigned
+  assigned
+  duplicate
+  needs_review
 }
 
 enum WhatsappConnectionStatus {
