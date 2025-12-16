@@ -3012,6 +3012,11 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                 },
             });
             console.log("💾 Mensaje guardado en DB (retail):", savedIncoming.id);
+            // Si el dueño tomó control manual del chat, no responde el bot
+            if (retailClient.manualChatHold) {
+                console.log("[Retail] Chat en control manual, sin respuesta automática.");
+                return res.sendStatus(200);
+            }
             // Si llegan comprobantes/medios, los guardamos como adjuntos al pedido más reciente
             if (mediaItems.length > 0) {
                 try {
@@ -5916,6 +5921,7 @@ app.post("/api/commerce/orders", auth_1.authMiddleware, async (req, res) => {
     }
 });
 app.patch("/api/commerce/orders/:id", auth_1.authMiddleware, async (req, res) => {
+    var _a, _b, _c;
     try {
         const doctorId = req.doctorId;
         const doctor = await prisma_1.prisma.doctor.findUnique({
@@ -6045,10 +6051,71 @@ app.patch("/api/commerce/orders/:id", auth_1.authMiddleware, async (req, res) =>
                 data: updateData,
             });
         }
-        const updated = await prisma_1.prisma.order.findUnique({
+        let updated = await prisma_1.prisma.order.findUnique({
             where: { id: order.id },
             include: { items: { include: { product: true } }, attachments: true, promotions: true },
         });
+        const confirmingRequested = status === "confirmed" || updateData.status === "confirmed";
+        if (updated && confirmingRequested && !updated.inventoryDeducted) {
+            const needByProductId = new Map();
+            for (const it of updated.items || []) {
+                needByProductId.set(it.productId, ((_a = needByProductId.get(it.productId)) !== null && _a !== void 0 ? _a : 0) + it.quantity);
+            }
+            const productIds = Array.from(needByProductId.keys());
+            const products = await prisma_1.prisma.product.findMany({
+                where: { id: { in: productIds }, doctorId },
+                select: { id: true, name: true, quantity: true },
+            });
+            const prodById = new Map(products.map((p) => [p.id, p]));
+            const shortages = [];
+            for (const [pid, need] of needByProductId.entries()) {
+                const p = prodById.get(pid);
+                const have = (_b = p === null || p === void 0 ? void 0 : p.quantity) !== null && _b !== void 0 ? _b : 0;
+                if (!p || have < need) {
+                    shortages.push({ name: (_c = p === null || p === void 0 ? void 0 : p.name) !== null && _c !== void 0 ? _c : "Producto", have, need });
+                }
+            }
+            if (shortages.length > 0) {
+                const msg = shortages
+                    .map((s) => `• ${s.name}: pediste ${s.need}, hay ${s.have}`)
+                    .join("\n");
+                return res.status(409).json({
+                    error: `Sin stock suficiente:\n${msg}`,
+                });
+            }
+            try {
+                await prisma_1.prisma.$transaction(async (tx) => {
+                    for (const [pid, need] of needByProductId.entries()) {
+                        const r = await tx.product.updateMany({
+                            where: { id: pid, doctorId, quantity: { gte: need } },
+                            data: { quantity: { decrement: need } },
+                        });
+                        if (r.count !== 1) {
+                            throw new Error(`NO_STOCK_RACE:${pid}:${need}`);
+                        }
+                    }
+                    await tx.order.update({
+                        where: { id: updated.id },
+                        data: {
+                            inventoryDeducted: true,
+                            inventoryDeductedAt: new Date(),
+                        },
+                    });
+                });
+            }
+            catch (e) {
+                if (typeof (e === null || e === void 0 ? void 0 : e.message) === "string" && e.message.startsWith("NO_STOCK_RACE:")) {
+                    return res.status(409).json({
+                        error: "Se quedó sin stock mientras confirmabas. Probá ajustar cantidades o reemplazar productos.",
+                    });
+                }
+                throw e;
+            }
+            updated = await prisma_1.prisma.order.findUnique({
+                where: { id: order.id },
+                include: { items: { include: { product: true } }, attachments: true, promotions: true },
+            });
+        }
         res.json({
             order: updated ? serializeOrderRecord(updated) : null,
         });
@@ -6113,6 +6180,74 @@ app.post("/api/commerce/orders/:id/attachments", auth_1.authMiddleware, async (r
     catch (error) {
         console.error("Error en POST /api/commerce/orders/:id/attachments:", error);
         res.status(500).json({ error: "No pudimos subir el comprobante." });
+    }
+});
+app.get("/api/commerce/chat-control", auth_1.authMiddleware, async (req, res) => {
+    var _a, _b;
+    try {
+        const doctorId = req.doctorId;
+        const doctor = await prisma_1.prisma.doctor.findUnique({
+            where: { id: doctorId },
+            select: { businessType: true },
+        });
+        if (!doctor || doctor.businessType !== "RETAIL") {
+            return res.status(403).json({ error: "Sección disponible solo para comercios." });
+        }
+        const phone = typeof req.query.phone === "string" ? req.query.phone : null;
+        if (!phone) {
+            return res.status(400).json({ error: "Falta el teléfono." });
+        }
+        const client = await prisma_1.prisma.retailClient.findFirst({
+            where: { doctorId, phone },
+            select: { id: true, manualChatHold: true },
+        });
+        return res.json({
+            hold: (_a = client === null || client === void 0 ? void 0 : client.manualChatHold) !== null && _a !== void 0 ? _a : false,
+            clientId: (_b = client === null || client === void 0 ? void 0 : client.id) !== null && _b !== void 0 ? _b : null,
+        });
+    }
+    catch (error) {
+        console.error("Error en GET /api/commerce/chat-control:", error);
+        res.status(500).json({ error: "No pudimos obtener el estado del chat." });
+    }
+});
+app.patch("/api/commerce/chat-control", auth_1.authMiddleware, async (req, res) => {
+    var _a, _b;
+    try {
+        const doctorId = req.doctorId;
+        const doctor = await prisma_1.prisma.doctor.findUnique({
+            where: { id: doctorId },
+            select: { businessType: true },
+        });
+        if (!doctor || doctor.businessType !== "RETAIL") {
+            return res.status(403).json({ error: "Sección disponible solo para comercios." });
+        }
+        const phone = typeof ((_a = req.body) === null || _a === void 0 ? void 0 : _a.phone) === "string" ? req.body.phone : null;
+        const hold = typeof ((_b = req.body) === null || _b === void 0 ? void 0 : _b.hold) === "boolean" ? req.body.hold : null;
+        if (!phone || hold === null) {
+            return res.status(400).json({ error: "Faltan parámetros (phone, hold)." });
+        }
+        const client = await prisma_1.prisma.retailClient.findFirst({
+            where: { doctorId, phone },
+            select: { id: true, manualChatHold: true },
+        });
+        if (!client) {
+            return res.status(404).json({ error: "Cliente no encontrado." });
+        }
+        const updated = await prisma_1.prisma.retailClient.update({
+            where: { id: client.id },
+            data: { manualChatHold: hold },
+            select: { id: true, manualChatHold: true },
+        });
+        return res.json({
+            ok: true,
+            clientId: updated.id,
+            hold: updated.manualChatHold,
+        });
+    }
+    catch (error) {
+        console.error("Error en PATCH /api/commerce/chat-control:", error);
+        res.status(500).json({ error: "No pudimos actualizar el estado del chat." });
     }
 });
 app.delete("/api/commerce/orders/:id", auth_1.authMiddleware, async (req, res) => {

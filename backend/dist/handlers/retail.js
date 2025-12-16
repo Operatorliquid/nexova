@@ -153,7 +153,7 @@ const parseOfficeHoursWindows = (raw) => {
     return windows.sort((a, b) => a.startMinute - b.startMinute);
 };
 async function handleRetailAgentAction(params) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s;
     const { doctor, patient, retailClient, action, replyToPatient, phoneE164, doctorNumber, doctorWhatsappConfig, rawText, } = params;
     let client = retailClient;
     const products = await prisma_1.prisma.product.findMany({
@@ -723,7 +723,66 @@ async function handleRetailAgentAction(params) {
         await sendMessage("No pude guardar el pedido. Probemos de nuevo indicando los productos.");
         return true;
     }
-    const order = upsert.order;
+    let order = upsert.order;
+    // ✅ Descontamos stock apenas se registra/edita el pedido para evitar carreras
+    if (!order.inventoryDeducted) {
+        const needByProductId = new Map();
+        for (const it of order.items || []) {
+            needByProductId.set(it.productId, ((_q = needByProductId.get(it.productId)) !== null && _q !== void 0 ? _q : 0) + it.quantity);
+        }
+        const productIds = Array.from(needByProductId.keys());
+        const productRows = await prisma_1.prisma.product.findMany({
+            where: { id: { in: productIds }, doctorId: doctor.id },
+            select: { id: true, name: true, quantity: true },
+        });
+        const prodById = new Map(productRows.map((p) => [p.id, p]));
+        const shortages = [];
+        for (const [pid, need] of needByProductId.entries()) {
+            const p = prodById.get(pid);
+            const have = (_r = p === null || p === void 0 ? void 0 : p.quantity) !== null && _r !== void 0 ? _r : 0;
+            if (!p || have < need) {
+                shortages.push({ name: (_s = p === null || p === void 0 ? void 0 : p.name) !== null && _s !== void 0 ? _s : "Producto", have, need });
+            }
+        }
+        if (shortages.length > 0) {
+            const msg = shortages.map((s) => `• ${s.name}: pediste ${s.need}, hay ${s.have}`).join("\n");
+            await sendMessage(`No tengo stock suficiente para ese pedido 😕\n\n${msg}\n\n` +
+                `Decime si querés ajustar cantidades o reemplazar productos.`);
+            return true;
+        }
+        try {
+            await prisma_1.prisma.$transaction(async (tx) => {
+                for (const [pid, need] of needByProductId.entries()) {
+                    const r = await tx.product.updateMany({
+                        where: { id: pid, doctorId: doctor.id, quantity: { gte: need } },
+                        data: { quantity: { decrement: need } },
+                    });
+                    if (r.count !== 1) {
+                        throw new Error(`NO_STOCK_RACE:${pid}:${need}`);
+                    }
+                }
+                await tx.order.update({
+                    where: { id: order.id },
+                    data: {
+                        inventoryDeducted: true,
+                        inventoryDeductedAt: new Date(),
+                    },
+                });
+            });
+            order = (await prisma_1.prisma.order.findUnique({
+                where: { id: order.id },
+                include: { items: { include: { product: true } } },
+            }));
+        }
+        catch (e) {
+            if (typeof (e === null || e === void 0 ? void 0 : e.message) === "string" && e.message.startsWith("NO_STOCK_RACE:")) {
+                await sendMessage("Uy, justo se quedó sin stock mientras armábamos el pedido 😕 " +
+                    "Decime si querés ajustar cantidades o cambiar productos.");
+                return true;
+            }
+            throw e;
+        }
+    }
     const summary = order.items
         .map((it) => { var _a; return `- ${it.quantity} x ${((_a = it.product) === null || _a === void 0 ? void 0 : _a.name) || "Producto"}`; })
         .join("\n") || "Pedido vacío";

@@ -3825,6 +3825,12 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
 
       console.log("💾 Mensaje guardado en DB (retail):", savedIncoming.id);
 
+      // Si el dueño tomó control manual del chat, no responde el bot
+      if (retailClient.manualChatHold) {
+        console.log("[Retail] Chat en control manual, sin respuesta automática.");
+        return res.sendStatus(200);
+      }
+
        // Si llegan comprobantes/medios, los guardamos como adjuntos al pedido más reciente
        if (mediaItems.length > 0) {
          try {
@@ -7439,10 +7445,79 @@ app.patch(
         });
       }
 
-      const updated = await prisma.order.findUnique({
+      let updated = await prisma.order.findUnique({
         where: { id: order.id },
         include: { items: { include: { product: true } }, attachments: true, promotions: true },
       });
+
+      const confirmingRequested =
+        status === "confirmed" || updateData.status === "confirmed";
+
+      if (updated && confirmingRequested && !updated.inventoryDeducted) {
+        const needByProductId = new Map<number, number>();
+        for (const it of updated.items || []) {
+          needByProductId.set(
+            it.productId,
+            (needByProductId.get(it.productId) ?? 0) + it.quantity
+          );
+        }
+        const productIds = Array.from(needByProductId.keys());
+        const products = await prisma.product.findMany({
+          where: { id: { in: productIds }, doctorId },
+          select: { id: true, name: true, quantity: true },
+        });
+        const prodById = new Map(products.map((p) => [p.id, p]));
+        const shortages = [];
+        for (const [pid, need] of needByProductId.entries()) {
+          const p = prodById.get(pid);
+          const have = p?.quantity ?? 0;
+          if (!p || have < need) {
+            shortages.push({ name: p?.name ?? "Producto", have, need });
+          }
+        }
+        if (shortages.length > 0) {
+          const msg = shortages
+            .map((s) => `• ${s.name}: pediste ${s.need}, hay ${s.have}`)
+            .join("\n");
+          return res.status(409).json({
+            error: `Sin stock suficiente:\n${msg}`,
+          });
+        }
+
+        try {
+          await prisma.$transaction(async (tx) => {
+            for (const [pid, need] of needByProductId.entries()) {
+              const r = await tx.product.updateMany({
+                where: { id: pid, doctorId, quantity: { gte: need } },
+                data: { quantity: { decrement: need } },
+              });
+              if (r.count !== 1) {
+                throw new Error(`NO_STOCK_RACE:${pid}:${need}`);
+              }
+            }
+            await tx.order.update({
+              where: { id: updated!.id },
+              data: {
+                inventoryDeducted: true,
+                inventoryDeductedAt: new Date(),
+              },
+            });
+          });
+        } catch (e: any) {
+          if (typeof e?.message === "string" && e.message.startsWith("NO_STOCK_RACE:")) {
+            return res.status(409).json({
+              error:
+                "Se quedó sin stock mientras confirmabas. Probá ajustar cantidades o reemplazar productos.",
+            });
+          }
+          throw e;
+        }
+
+        updated = await prisma.order.findUnique({
+          where: { id: order.id },
+          include: { items: { include: { product: true } }, attachments: true, promotions: true },
+        });
+      }
 
       res.json({
         order: updated ? serializeOrderRecord(updated) : null,
@@ -7520,6 +7595,87 @@ app.post(
     } catch (error) {
       console.error("Error en POST /api/commerce/orders/:id/attachments:", error);
       res.status(500).json({ error: "No pudimos subir el comprobante." });
+    }
+  }
+);
+
+app.get(
+  "/api/commerce/chat-control",
+  authMiddleware,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+      if (!doctor || doctor.businessType !== "RETAIL") {
+        return res.status(403).json({ error: "Sección disponible solo para comercios." });
+      }
+
+      const phone = typeof req.query.phone === "string" ? req.query.phone : null;
+      if (!phone) {
+        return res.status(400).json({ error: "Falta el teléfono." });
+      }
+
+      const client = await prisma.retailClient.findFirst({
+        where: { doctorId, phone },
+        select: { id: true, manualChatHold: true },
+      });
+
+      return res.json({
+        hold: client?.manualChatHold ?? false,
+        clientId: client?.id ?? null,
+      });
+    } catch (error) {
+      console.error("Error en GET /api/commerce/chat-control:", error);
+      res.status(500).json({ error: "No pudimos obtener el estado del chat." });
+    }
+  }
+);
+
+app.patch(
+  "/api/commerce/chat-control",
+  authMiddleware,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const doctorId = req.doctorId!;
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: doctorId },
+        select: { businessType: true },
+      });
+      if (!doctor || doctor.businessType !== "RETAIL") {
+        return res.status(403).json({ error: "Sección disponible solo para comercios." });
+      }
+
+      const phone = typeof req.body?.phone === "string" ? req.body.phone : null;
+      const hold = typeof req.body?.hold === "boolean" ? req.body.hold : null;
+      if (!phone || hold === null) {
+        return res.status(400).json({ error: "Faltan parámetros (phone, hold)." });
+      }
+
+      const client = await prisma.retailClient.findFirst({
+        where: { doctorId, phone },
+        select: { id: true, manualChatHold: true },
+      });
+      if (!client) {
+        return res.status(404).json({ error: "Cliente no encontrado." });
+      }
+
+      const updated = await prisma.retailClient.update({
+        where: { id: client.id },
+        data: { manualChatHold: hold },
+        select: { id: true, manualChatHold: true },
+      });
+
+      return res.json({
+        ok: true,
+        clientId: updated.id,
+        hold: updated.manualChatHold,
+      });
+    } catch (error) {
+      console.error("Error en PATCH /api/commerce/chat-control:", error);
+      res.status(500).json({ error: "No pudimos actualizar el estado del chat." });
     }
   }
 );

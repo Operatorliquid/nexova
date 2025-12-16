@@ -72,6 +72,7 @@ model RetailClient {
   dni             String?
   businessAddress String?
   phone           String?
+  manualChatHold  Boolean            @default(false)
   doctor          Doctor             @relation(fields: [doctorId], references: [id], onDelete: Cascade)
   doctorId        Int
   patient         Patient?           @relation("PatientRetailClient", fields: [patientId], references: [id], onDelete: SetNull)

@@ -1977,6 +1977,8 @@ const handleProfileFieldChange = useCallback(
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [messagesError, setMessagesError] = useState<string | null>(null);
   const [quickChatModalOpen, setQuickChatModalOpen] = useState(false);
+  const [chatControlHold, setChatControlHold] = useState(false);
+  const [chatControlLoading, setChatControlLoading] = useState(false);
 
 // Documentos
   const [, setDocuments] = useState<PatientDocumentItem[]>([]);
@@ -1991,6 +1993,7 @@ const handleProfileFieldChange = useCallback(
   const [inboxData, setInboxData] = useState<InboxData>(() =>
     buildEmptyInboxData()
   );
+  const [inboxReadAt, setInboxReadAt] = useState<string | null>(null);
   const [inboxLoading, setInboxLoading] = useState(false);
   const [inboxError, setInboxError] = useState<string | null>(null);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
@@ -2789,8 +2792,13 @@ const automationAppointmentPool = useMemo(() => {
 
   const handleMarkAllNotificationsRead = useCallback(() => {
     if (inboxTotalCount === 0) return;
+    const nowIso = new Date().toISOString();
     setInboxData(buildEmptyInboxData());
-  }, [inboxTotalCount]);
+    setInboxReadAt(nowIso);
+    if (doctor?.id) {
+      localStorage.setItem(`inbox_read_at_${doctor.id}`, nowIso);
+    }
+  }, [inboxTotalCount, doctor?.id]);
 
   const metricsRangeLabel = useMemo(() => {
     return (
@@ -3018,6 +3026,7 @@ const automationAppointmentPool = useMemo(() => {
     try {
       setOrdersLoading(true);
       setOrdersError(null);
+      setOrders([]);
       const res = await fetch(buildApiUrl("/api/commerce/orders"), {
         headers: {
           Authorization: `Bearer ${token}`,
@@ -3033,6 +3042,8 @@ const automationAppointmentPool = useMemo(() => {
     } catch (err: any) {
       console.error("Error al cargar pedidos:", err);
       setOrdersError(err?.message || "No pudimos cargar los pedidos.");
+      setOrders([]);
+      setOrdersVersion((v) => v + 1);
     } finally {
       setOrdersLoading(false);
     }
@@ -4626,19 +4637,32 @@ const automationAppointmentPool = useMemo(() => {
         }
 
         const json = await res.json();
+        const readLimit = inboxReadAt ? new Date(inboxReadAt) : null;
+        const isNew = (d: string | null | undefined) => {
+          if (!readLimit) return true;
+          const ts = d ? new Date(d).getTime() : NaN;
+          return !Number.isFinite(ts) || ts > readLimit.getTime();
+        };
+
         setInboxData({
           documents: Array.isArray(json.documents)
-            ? (json.documents as InboxDocument[])
+            ? (json.documents as InboxDocument[]).filter((doc) => isNew(doc.createdAt))
             : [],
           newAppointments: Array.isArray(json.newAppointments)
-            ? (json.newAppointments as InboxAppointment[])
+            ? (json.newAppointments as InboxAppointment[]).filter((a) => isNew(a.createdAt))
             : [],
           incompletePatients: Array.isArray(json.incompletePatients)
-            ? (json.incompletePatients as InboxPatient[])
+            ? (json.incompletePatients as InboxPatient[]).filter((p) => isNew(p.createdAt))
             : [],
-          newOrders: Array.isArray(json.newOrders) ? json.newOrders : [],
-          newClients: Array.isArray(json.newClients) ? json.newClients : [],
-          overdueOrders: Array.isArray(json.overdueOrders) ? json.overdueOrders : [],
+          newOrders: Array.isArray(json.newOrders)
+            ? json.newOrders.filter((o: any) => isNew(o.createdAt))
+            : [],
+          newClients: Array.isArray(json.newClients)
+            ? json.newClients.filter((c: any) => isNew(c.createdAt))
+            : [],
+          overdueOrders: Array.isArray(json.overdueOrders)
+            ? json.overdueOrders.filter((o: any) => isNew(o.createdAt))
+            : [],
         });
       } catch (err: any) {
         console.error("Error al cargar pendientes:", err);
@@ -4647,7 +4671,7 @@ const automationAppointmentPool = useMemo(() => {
         if (!silent) setInboxLoading(false);
       }
     },
-    [token]
+    [token, inboxReadAt]
   );
 
   useEffect(() => {
@@ -4657,6 +4681,10 @@ const automationAppointmentPool = useMemo(() => {
 
   useEffect(() => {
     if (!token) return;
+    if (doctor?.id) {
+      const stored = localStorage.getItem(`inbox_read_at_${doctor.id}`);
+      setInboxReadAt(stored || null);
+    }
     fetchInboxData();
     const intervalId = window.setInterval(() => {
       fetchInboxData({ silent: true });
@@ -8221,6 +8249,85 @@ const automationAppointmentPool = useMemo(() => {
   const clinicalHistoryPatient = clinicalHistorySnapshot?.patient ?? null;
   const clinicalHistoryConsultations =
     clinicalHistorySnapshot?.consultations ?? [];
+
+  // Control manual del chat (retail)
+  useEffect(() => {
+    if (!token || !isRetailBusiness) {
+      setChatControlHold(false);
+      return;
+    }
+    const phone = selectedPatient?.phone;
+    if (!phone) {
+      setChatControlHold(false);
+      return;
+    }
+    let cancelled = false;
+    const run = async () => {
+      try {
+        setChatControlLoading(true);
+        const res = await fetch(
+          buildApiUrl(`/api/commerce/chat-control?phone=${encodeURIComponent(phone)}`),
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          }
+        );
+        if (!res.ok) throw new Error("No pudimos obtener el estado del chat.");
+        const json = await res.json().catch(() => null);
+        if (!cancelled) {
+          setChatControlHold(Boolean(json?.hold));
+        }
+      } catch (err) {
+        console.error("Error al consultar control de chat:", err);
+        if (!cancelled) setChatControlHold(false);
+      } finally {
+        if (!cancelled) setChatControlLoading(false);
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [token, isRetailBusiness, selectedPatient?.phone, selectedPatient?.id]);
+
+  const handleToggleChatControl = useCallback(async () => {
+    if (!token || !isRetailBusiness) return;
+    const phone = selectedPatient?.phone;
+    if (!phone) return;
+    try {
+      setChatControlLoading(true);
+      const next = !chatControlHold;
+      const res = await fetch(buildApiUrl("/api/commerce/chat-control"), {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ phone, hold: next }),
+      });
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => null);
+        throw new Error(errJson?.error || "No pudimos actualizar el control del chat.");
+      }
+      const json = await res.json().catch(() => null);
+      setChatControlHold(Boolean(json?.hold ?? next));
+      setNotification({
+        type: "success",
+        message: next ? "Tomaste el control de este chat." : "El bot vuelve a responder este chat.",
+      });
+      setTimeout(() => setNotification(null), 3000);
+    } catch (err: any) {
+      console.error("Error al alternar control del chat:", err);
+      setNotification({
+        type: "error",
+        message: err?.message || "No pudimos actualizar el control del chat.",
+      });
+      setTimeout(() => setNotification(null), 3500);
+    } finally {
+      setChatControlLoading(false);
+    }
+  }, [token, isRetailBusiness, selectedPatient?.phone, chatControlHold]);
   const sidebarProps = {
     activeSection,
     onChangeSection: handleSidebarSectionChange,
@@ -9596,6 +9703,31 @@ return (
                                       `${contactLabels.singularCapitalized} sin nombre`}
                                   </span>
                                 </div>
+                                {isRetailBusiness && selectedPatient.phone && (
+                                  <div className="mb-2">
+                                    <button
+                                      type="button"
+                                      onClick={handleToggleChatControl}
+                                      disabled={chatControlLoading}
+                                      className={`inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-[11px] font-semibold border transition ${
+                                        chatControlHold
+                                          ? "border-rose-400 text-rose-50 bg-rose-500/20"
+                                          : "border-emerald-300 text-emerald-50 bg-emerald-500/20"
+                                      } disabled:opacity-60`}
+                                    >
+                                      {chatControlLoading
+                                        ? "Actualizando..."
+                                        : chatControlHold
+                                        ? "Dejar el control"
+                                        : "Tomar el control"}
+                                    </button>
+                                    <p className="text-[10px] text-slate-500 mt-1">
+                                      {chatControlHold
+                                        ? "Vos respondés. El bot está pausado para este número."
+                                        : "El bot responde automáticamente. Podés pausarlo para hablar directo."}
+                                    </p>
+                                  </div>
+                                )}
                                 {isMedicalDoctor && (
                                   <div className="rounded-xl border border-slate-700 bg-[#151515] px-3 py-2 text-[11px] text-muted">
                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

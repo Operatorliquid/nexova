@@ -913,7 +913,75 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
     return true;
   }
 
-  const order = upsert.order;
+  let order = upsert.order;
+
+  // ✅ Descontamos stock apenas se registra/edita el pedido para evitar carreras
+  if (!order.inventoryDeducted) {
+    const needByProductId = new Map<number, number>();
+    for (const it of order.items || []) {
+      needByProductId.set(it.productId, (needByProductId.get(it.productId) ?? 0) + it.quantity);
+    }
+    const productIds = Array.from(needByProductId.keys());
+    const productRows = await prisma.product.findMany({
+      where: { id: { in: productIds }, doctorId: doctor.id },
+      select: { id: true, name: true, quantity: true },
+    });
+    const prodById = new Map(productRows.map((p) => [p.id, p]));
+
+    const shortages = [];
+    for (const [pid, need] of needByProductId.entries()) {
+      const p = prodById.get(pid);
+      const have = p?.quantity ?? 0;
+      if (!p || have < need) {
+        shortages.push({ name: p?.name ?? "Producto", have, need });
+      }
+    }
+
+    if (shortages.length > 0) {
+      const msg = shortages.map((s) => `• ${s.name}: pediste ${s.need}, hay ${s.have}`).join("\n");
+      await sendMessage(
+        `No tengo stock suficiente para ese pedido 😕\n\n${msg}\n\n` +
+          `Decime si querés ajustar cantidades o reemplazar productos.`
+      );
+      return true;
+    }
+
+    try {
+      await prisma.$transaction(async (tx) => {
+        for (const [pid, need] of needByProductId.entries()) {
+          const r = await tx.product.updateMany({
+            where: { id: pid, doctorId: doctor.id, quantity: { gte: need } },
+            data: { quantity: { decrement: need } },
+          });
+          if (r.count !== 1) {
+            throw new Error(`NO_STOCK_RACE:${pid}:${need}`);
+          }
+        }
+        await tx.order.update({
+          where: { id: order.id },
+          data: {
+            inventoryDeducted: true,
+            inventoryDeductedAt: new Date(),
+          },
+        });
+      });
+
+      order = (await prisma.order.findUnique({
+        where: { id: order.id },
+        include: { items: { include: { product: true } } },
+      })) as typeof order;
+    } catch (e: any) {
+      if (typeof e?.message === "string" && e.message.startsWith("NO_STOCK_RACE:")) {
+        await sendMessage(
+          "Uy, justo se quedó sin stock mientras armábamos el pedido 😕 " +
+            "Decime si querés ajustar cantidades o cambiar productos."
+        );
+        return true;
+      }
+      throw e;
+    }
+  }
+
   const summary =
     order.items
       .map((it) => `- ${it.quantity} x ${it.product?.name || "Producto"}`)
