@@ -180,13 +180,56 @@ type HandleRetailParams = {
   rawText: string;
 };
 
+// ✅ FIX: evitar redeclare de "norm" (dejo este helper sin uso por ahora, solo renombrado)
+const normLite = (s: string) =>
+  (s || "")
+    .toLowerCase()
+    .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // sÍ -> si
+    .replace(/\s+/g, " ");
+
 const isYes = (txt: string) => {
-  const t = (txt || "").trim().toLowerCase();
-  return /^(si|sí|sisi|ok|dale|listo|confirmo|confirmar|de una|obvio)$/.test(t);
+  const t = norm(txt);
+
+  // acepta: si, sii, sisi, ok/okay/okey, dale, listo, de una/deuna, joya, perfecto, genial, barbaro, buenisimo
+  // y también confirmar/confirmo/confirmar
+  return /^(si+|sisi+|ok(ey|a|ay)?|dale+|listo+|confirm(o|ar)?|de una|deuna|obvio|joya|perfecto|genial|barbaro|buenisimo)$/.test(
+    t
+  );
 };
+
 const isNo = (txt: string) => {
-  const t = (txt || "").trim().toLowerCase();
-  return /^(no|nop|nah|negativo)$/.test(t);
+  const t = norm(txt);
+
+  // acepta: no, noo, nooo, nop, nah, negativo, para nada
+  return /^(no+|nop+|noo+|na+|nono+|non+|noon+|noooo+|non+|Noo+|No+|Non+|negativo|para nada)$/.test(
+    t
+  );
+};
+
+// ✅ “eh?/que?/no entiendo” (respuesta de confusión)
+const isConfusion = (txt: string) => {
+  const t = norm(txt);
+  return /^(eh+|e+|que|ke|como|no entendi|no entiendo)$/.test(t) || t.length === 0;
+};
+
+const firstSentence = (s: string) => {
+  if (!s) return "";
+  const i = s.search(/[¿?]/);
+  const cut = i > 0 ? s.slice(0, i) : s;
+  return cut.trim();
+};
+
+// ✅ FIX: Detecta si el último mensaje del bot ofrecía promo o preguntaba cancelar
+const lastBotAskedCancel = (lastBotMsg: string) => /\bcancel/.test(norm(lastBotMsg));
+
+const lastBotAskedPromo = (lastBotMsg: string) => {
+  const t = norm(lastBotMsg);
+  const hasPromoWord = t.includes("promo") || t.includes("descuento") || t.includes("off");
+  const isOfferQuestion =
+    t.includes("queres") || t.includes("aprovechar") || t.includes("sumar") || t.includes("agregar");
+  return hasPromoWord && isOfferQuestion;
 };
 
 function asksPaymentMethod(raw: string) {
@@ -304,10 +347,7 @@ export async function setAwaitingProofOrderNumber(params: { doctorId: number; cl
   awaitingProofMap.set(`${params.doctorId}:${params.clientId}`, Date.now());
 }
 
-export async function clearAwaitingProofOrderNumber(params: {
-  doctorId: number;
-  clientId: number;
-}) {
+export async function clearAwaitingProofOrderNumber(params: { doctorId: number; clientId: number }) {
   awaitingProofMap.delete(`${params.doctorId}:${params.clientId}`);
 }
 
@@ -331,13 +371,13 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
     doctor,
     patient,
     retailClient,
-  action,
-  replyToPatient,
-  phoneE164,
-  doctorNumber,
-  doctorWhatsappConfig,
-  rawText,
-} = params;
+    action,
+    replyToPatient,
+    phoneE164,
+    doctorNumber,
+    doctorWhatsappConfig,
+    rawText,
+  } = params;
 
   let client = retailClient;
 
@@ -352,11 +392,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
   const sendMessage = async (text: string) => {
     const messageWithHint = appendMenuHintForBusiness(text, doctor.businessType);
     try {
-      const waResult = await sendWhatsAppText(
-        phoneE164,
-        messageWithHint,
-        doctorWhatsappConfig
-      );
+      const waResult = await sendWhatsAppText(phoneE164, messageWithHint, doctorWhatsappConfig);
       await prisma.message.create({
         data: {
           waMessageId: (waResult as any)?.sid ?? null,
@@ -483,8 +519,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
         data: { status: "cancelled" },
       });
       await sendMessage(
-        replyToPatient ||
-          `Cancelé el pedido #${pending.sequenceNumber}. Avisame si querés armar otro.`
+        replyToPatient || `Cancelé el pedido #${pending.sequenceNumber}. Avisame si querés armar otro.`
       );
       return true;
     }
@@ -497,9 +532,8 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
   // ===============================
   const removeIncoming = (rawText || "").trim().toLowerCase();
 
-  const isRemoveIntent = /\b(quit(a|ame|á)|sac(a|ame|á)|elimin(a|ame|á)|borra|borrame|borrar|sin)\b/i.test(
-    removeIncoming
-  );
+  const isRemoveIntent =
+    /\b(quit(a|ame|á)|sac(a|ame|á)|elimin(a|ame|á)|borra|borrame|borrar|sin)\b/i.test(removeIncoming);
 
   if (isRemoveIntent) {
     const pending = await prisma.order.findFirst({
@@ -510,7 +544,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
 
     if (!pending) {
       await sendMessage(
-        "No encontré un pedido en revisión para editar. Pasame tu pedido con productos y cantidades 🙌"
+        "No encontré un pedido pendiente para editar. Pasame tu pedido con productos y cantidades 🙌"
       );
       return true;
     }
@@ -542,15 +576,16 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
     const digitMatch = removeIncoming.match(/\b(\d+)\b/);
     if (digitMatch) qty = parseInt(digitMatch[1], 10);
     if (!qty) {
-      const wn = Object.keys(wordNums).find((w) =>
-        new RegExp(`\\b${w}\\b`, "i").test(removeIncoming)
-      );
+      const wn = Object.keys(wordNums).find((w) => new RegExp(`\\b${w}\\b`, "i").test(removeIncoming));
       if (wn) qty = wordNums[wn];
     }
 
     // Sacar el “verbo” y basura típica para quedarnos con el nombre del producto
     let candidate = removeIncoming
-      .replace(/^(por\s+favor\s+)?(quitame|quita|quitá|sacame|saca|sacá|eliminame|elimina|borra|borrame|borrar|sin)\s+/i, "")
+      .replace(
+        /^(por\s+favor\s+)?(quitame|quita|quitá|sacame|saca|sacá|eliminame|elimina|borra|borrame|borrar|sin)\s+/i,
+        ""
+      )
       .replace(/\b(todas?|todo|toda|los|las|el|la|un|una|uno)\b/gi, " ")
       .replace(/\b\d+\b/g, " ")
       .replace(/\s+/g, " ")
@@ -619,12 +654,14 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
     });
 
     const summary =
-      updated?.items
-        .map((it) => `- ${it.quantity} x ${it.product.name}`)
-        .join("\n") || "Pedido vacío";
+      updated?.items.map((it) => `- ${it.quantity} x ${it.product.name}`).join("\n") || "Pedido vacío";
 
     await sendMessage(
-      `Listo ✅ Saqué ${removeAll ? "todas" : removeQty} ${match.name}.\n\nPedido #${pending.sequenceNumber} (estado: Falta revisión):\n${summary}\nTotal: $${updated?.totalAmount ?? 0}\n\nSi está OK respondé *CONFIRMAR* (o OK / dale / listo) o decime qué querés sumar/quitar.`
+      `Listo ✅ Saqué ${removeAll ? "todas" : removeQty} ${match.name}.\n\nPedido #${
+        pending.sequenceNumber
+      } :\n${summary}\nTotal: $${
+        updated?.totalAmount ?? 0
+      }\n\nSi está OK respondé *CONFIRMAR* (o OK / dale / listo) o decime qué querés sumar/quitar.`
     );
 
     return true;
@@ -634,9 +671,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
 
   // ✅ Aceptación corta del cliente después de “no hay stock”
   const isAcceptShortage =
-    /^(ok|oka|okey|dale|listo|bueno|esta bien|está bien|ta bien|tá bien|perfecto)$/i.test(
-      incoming
-    );
+    /^(ok|oka|okey|dale|listo|bueno|esta bien|está bien|ta bien|tá bien|perfecto)$/i.test(incoming);
 
   if (isAcceptShortage) {
     const pending = await prisma.order.findFirst({
@@ -646,7 +681,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
     });
 
     if (!pending) {
-      await sendMessage("No encontré un pedido en revisión 🙌 Decime qué querés pedir.");
+      await sendMessage("No encontré un pedido pendiente 🙌 Decime qué querés pedir.");
       return true;
     }
 
@@ -708,15 +743,14 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
 
       if (!updated || updated.items.length === 0) {
         await sendMessage(
-          `Dale ✅ Lo dejé sin esos productos porque no había stock.\n\n` +
-            `Tu pedido quedó vacío. ¿Querés pedir otra cosa?`
+          `Dale ✅ Lo dejé sin esos productos porque no había stock.\n\nTu pedido quedó vacío. ¿Querés pedir otra cosa?`
         );
         return true;
       }
 
       await sendMessage(
-        `Listo ✅ Ajusté el pedido al stock disponible.\n\n` +
-          `Pedido #${updated.sequenceNumber} (estado: Falta revisión):\n${summary}\n` +
+        `Listo ✅ Ajusté el pedido.\n\n` +
+          `Pedido #${updated.sequenceNumber}:\n${summary}\n` +
           `Total: $${updated.totalAmount}\n\n` +
           `Si está OK respondé *CONFIRMAR*. Si querés cambiar algo, decime qué sumás/quitás.`
       );
@@ -731,9 +765,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
   if (asksPaymentMethod(msgText)) {
     const alias = (doctor as any)?.businessAlias?.trim?.();
     if (!alias) {
-      await sendMessage(
-        "Todavía no tengo cargado el alias/CBU acá 😕 Decime y te lo paso enseguida."
-      );
+      await sendMessage("Todavía no tengo cargado el alias/CBU acá 😕.");
       return true;
     }
     await sendMessage(formatAliasReply(alias));
@@ -752,6 +784,31 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
     select: { body: true },
   });
   const lastBotMsg = lastBotMsgRow?.body || "";
+
+  // ✅ Si el cliente pone “eh?/qué?/no entiendo”, repetimos lo último y NO cambiamos de tema
+  if (isConfusion(msgText) && lastBotMsg) {
+    const core = firstSentence(lastBotMsg);
+    if (core) {
+      await sendMessage(`Perdón 🙏 Te decía: ${core}`);
+      return true;
+    }
+  }
+
+  // ✅ FIX: “no/noo” contextual (promo/cancel) — evita preguntas genéricas
+  if (isNo(msgText) && lastBotMsg) {
+    if (lastBotAskedPromo(lastBotMsg)) {
+      await sendMessage(
+        "Dale 🙌 No te agrego la promo. ¿Querés armar un pedido igual? Pasame productos y cantidades."
+      );
+      return true;
+    }
+
+    if (lastBotAskedCancel(lastBotMsg)) {
+      await sendMessage("Tranqui 🙂 No cancelo nada. ¿Querías algo más o era solo consulta?");
+      return true;
+    }
+  }
+
   const candidateSeq = parseProofCandidateFromLastBotMessage(lastBotMsg);
 
   if (candidateSeq && (isYes(msgText) || isNo(msgText))) {
@@ -832,10 +889,9 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
     // Ya descontado => no repetir
     if (pending.inventoryDeducted) {
       const summary =
-        pending.items.map((it) => `• ${it.quantity} x ${it.product.name}`).join("\n") ||
-        "Pedido vacío";
+        pending.items.map((it) => `• ${it.quantity} x ${it.product.name}`).join("\n") || "Pedido vacío";
       await sendMessage(
-        `Ya estaba confirmado ✅ (stock ya reservado).\n\nPedido #${pending.sequenceNumber}:\n${summary}\nTotal: $${pending.totalAmount}`
+        `Ya estaba enviado ✅.\n\nPedido #${pending.sequenceNumber}:\n${summary}\nTotal: $${pending.totalAmount}`
       );
       return true;
     }
@@ -918,11 +974,10 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
     });
 
     const summary =
-      confirmed?.items.map((it) => `• ${it.quantity} x ${it.product.name}`).join("\n") ||
-      "Pedido vacío";
+      confirmed?.items.map((it) => `• ${it.quantity} x ${it.product.name}`).join("\n") || "Pedido vacío";
 
     await sendMessage(
-      `Listo ✅ confirmé tu pedido y reservé el stock.\n\n` +
+      `Listo ✅ envie tu pedido.\n\n` +
         `Pedido #${confirmed?.sequenceNumber} (estado: Falta revisión):\n${summary}\n` +
         `Total: $${confirmed?.totalAmount ?? 0}`
     );
@@ -930,10 +985,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
     return true;
   }
 
-  if (
-    action.type !== "retail_upsert_order" &&
-    action.type !== "retail_cancel_order"
-  ) {
+  if (action.type !== "retail_upsert_order" && action.type !== "retail_cancel_order") {
     return false;
   }
 
@@ -945,9 +997,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
   });
 
   if (!items || items.length === 0) {
-    await sendMessage(
-      "Decime productos y cantidades, ej: 2 coca, 3 galletitas."
-    );
+    await sendMessage("Decime productos y cantidades, ej: 2 coca, 3 galletitas.");
     return true;
   }
 
@@ -975,8 +1025,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
   }
 
   const missingProducts: string[] = [];
-  const resolvedItems: Array<{ productId: number; quantity: number; name: string; op?: string }> =
-    [];
+  const resolvedItems: Array<{ productId: number; quantity: number; name: string; op?: string }> = [];
 
   for (const item of normalized) {
     const candidateName = (item as any).normalizedName || item.name;
@@ -1010,9 +1059,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
 
     await sendMessage(
       `No pude reconocer: ${missingProducts.join(", ")}.` +
-        (suggestions.length
-          ? ` Opciones que tengo: ${suggestions.join(" · ")}.`
-          : "") +
+        (suggestions.length ? ` Opciones que tengo: ${suggestions.join(" · ")}.` : "") +
         ` Decime el nombre exacto como figura en el stock (ej: "yerba playadito 1kg").`
     );
     return true;
@@ -1020,7 +1067,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
 
   if (resolvedItems.length === 0) {
     await sendMessage(
-      `No pude mapear estos productos al stock: ${missingProducts.join(
+      `No pude encontrar estos productos en el stock: ${missingProducts.join(
         ", "
       )}. Decime nombres más precisos o reemplazos (ej: "yerba playadito 1kg", "coca 1.5L").`
     );
@@ -1052,15 +1099,14 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
       })
       .join("\n");
     await sendMessage(
-      `Tengo estos pedidos en revisión:\n${summary}\nDecime qué producto querés sumar, quitar o cambiar y sobre cuál pedido (#).`
+      `Tengo estos pedidos:\n${summary}\nDecime qué producto querés sumar, quitar o cambiar y sobre cuál pedido (#).`
     );
     return true;
   }
 
   // "sumar/agregar" => suma cantidades. Si no, setea la cantidad del producto mencionado.
   const addMode =
-    action.mode === "merge" ||
-    /\b(sum(ar|ame|á)|agreg(ar|ame|á|alas)|añad(ir|ime|í)|mas|\+)\b/i.test(rawText);
+    action.mode === "merge" || /\b(sum(ar|ame|á)|agreg(ar|ame|á|alas)|añad(ir|ime|í)|mas|\+)\b/i.test(rawText);
 
   const target = pendingOrders[0] ?? null;
   const targetOrderId = target?.id ?? null;
@@ -1085,8 +1131,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
 
   for (const it of resolvedItems) {
     const baseOp = (it as any).op as string | undefined;
-    const op: "add" | "remove" | "set" =
-      baseOp === "remove" || baseOp === "set" ? baseOp : "add";
+    const op: "add" | "remove" | "set" = baseOp === "remove" || baseOp === "set" ? baseOp : "add";
     const qty = Math.max(0, Math.trunc((it as any).quantity || 0));
     const prev = currentQuantities.get(it.productId) ?? 0;
 
@@ -1123,9 +1168,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
   });
   if (stockIssues.length > 0) {
     await sendMessage(
-      `No tengo stock suficiente para: ${stockIssues.join(
-        ", "
-      )}. Decime si querés ajustar cantidades o reemplazar.`
+      `No tengo stock suficiente para: ${stockIssues.join(", ")}. Decime si querés ajustar cantidades o reemplazar.`
     );
     return true;
   }
@@ -1137,10 +1180,8 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
     mode: "replace",
     status: "pending", // siempre queda en revisión; la confirmación real la hace el dueño en el panel
     existingOrderId: targetOrderId,
-    customerName:
-      action.clientInfo?.fullName || client.fullName || patient?.fullName || "Cliente WhatsApp",
-    customerAddress:
-      action.clientInfo?.address || client.businessAddress || patient?.address || null,
+    customerName: action.clientInfo?.fullName || client.fullName || patient?.fullName || "Cliente WhatsApp",
+    customerAddress: action.clientInfo?.address || client.businessAddress || patient?.address || null,
     customerDni: action.clientInfo?.dni || client.dni || patient?.dni || null,
   });
 
@@ -1219,9 +1260,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
   }
 
   const summary =
-    order.items
-      .map((it) => `- ${it.quantity} x ${it.product?.name || "Producto"}`)
-      .join("\n") || "Pedido vacío";
+    order.items.map((it) => `- ${it.quantity} x ${it.product?.name || "Producto"}`).join("\n") || "Pedido vacío";
 
   const isEditingExisting = !!targetOrderId;
   const changesText =
@@ -1247,7 +1286,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
 
   await sendMessage(
     `${prefix}Revisá si está bien 👇\n\n` +
-      `Pedido #${order.sequenceNumber} (estado: Falta revisión):\n${summary}\nTotal: $${order.totalAmount}\n\n` +
+      `Pedido #${order.sequenceNumber} (Enviado):\n${summary}\nTotal: $${order.totalAmount}\n\n` +
       `Si está OK respondé *CONFIRMAR* (o OK / dale / listo).\n` +
       `Para sumar: "sumar 1 coca". Para quitar: "quitar coca". Para cambiar: "cambiar coca a 3".`
   );

@@ -3890,23 +3890,28 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
               );
               const fileUrl = savedFile.url;
 
-              const duplicateExact = await prisma.paymentProof.findFirst({
-                where: { doctorId: doctor.id, bytesSha256: hash },
-                orderBy: { createdAt: "desc" },
-              });
+             const duplicateExact = await prisma.paymentProof.findFirst({
+  where: {
+    doctorId: doctor.id,
+    clientId: retailClient.id, // ✅ clave: no mezclar clientes
+    bytesSha256: hash,
+  },
+  orderBy: { createdAt: "desc" },
+});
 
               let duplicateOfId = duplicateExact?.id ?? null;
 
               if (!duplicateOfId && dhash) {
                 const candidates = await prisma.paymentProof.findMany({
-                  where: {
-                    doctorId: doctor.id,
-                    imageDhash: { not: null },
-                  },
-                  select: { id: true, imageDhash: true },
-                  orderBy: { createdAt: "desc" },
-                  take: 40,
-                });
+  where: {
+    doctorId: doctor.id,
+    clientId: retailClient.id, // ✅ clave: no mezclar clientes
+    imageDhash: { not: null },
+  },
+  select: { id: true, imageDhash: true },
+  orderBy: { createdAt: "desc" },
+  take: 40,
+});
 
                 const hammingHex = (a: string, b: string) => {
                   const len = Math.min(a.length, b.length);
