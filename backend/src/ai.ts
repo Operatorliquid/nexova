@@ -138,10 +138,33 @@ export type WhatsappAgentContext = {
     additionalNotes: string | null;
     slotMinutes?: number | null;
   };
-  productCatalog?: any;
-  activePromotions?: any;
-  storeProfile?: any;
-  incomingMedia?: any;
+  productCatalog?: Array<
+    | string
+    | {
+        name: string;
+        price: number;
+        unit?: string;
+        keywords?: string[];
+      }
+  >;
+  activePromotions?: Array<
+    | string
+    | {
+        title: string;
+        description?: string;
+        validUntil?: string;
+      }
+  >;
+  storeProfile?: {
+    name?: string;
+    hours?: string;
+    address?: string;
+  };
+  incomingMedia?: {
+    count: number;
+    urls: string[];
+    contentTypes?: string[];
+  };
   retailConversationState?: any;
 };
 

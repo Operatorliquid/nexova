@@ -59,6 +59,7 @@ Reglas de comportamiento:
 Precios / promos:
 - Si preguntan precio de un producto y está en el catálogo/contexto, respondé con el precio.
 - Si el producto es ambiguo (ej: "jugo"), pedí 1 detalle (marca/sabor/tamaño) y sugerí 2-4 opciones del catálogo.
+- Si el producto está en el catálogo y tiene precio, decí el precio directo (no respondas "puede variar").
 - Si preguntan por promos, listá las promos activas del contexto. Si no hay, decilo claro (sin inventar).
 - Nunca hables de agenda médica ni turnos.
 - Nunca preguntes si agregar a pedido actual o crear uno nuevo. Si el cliente pide productos/cantidades, devolvé retail_upsert_order con SOLO los items de ESTE mensaje. El backend decide si edita o crea según si hay pending.
@@ -89,19 +90,17 @@ export async function runRetailAgent(
 
   try {
     const productCatalog = (ctx as any).productCatalog;
-    const promos = (ctx as any).activePromotions || (ctx as any).promotions;
+    const activePromotions = (ctx as any).activePromotions || (ctx as any).promotions;
     const storeProfile = (ctx as any).storeProfile || (ctx as any).businessProfile;
     const incomingMedia = (ctx as any).incomingMedia || (ctx as any).media;
     const retailState = (ctx as any).retailConversationState || (ctx as any).conversationState;
 
     const catalogText = formatCatalogForPrompt(productCatalog);
-    const promosText = formatPromosForPrompt(promos);
+    const promosText = formatPromosForPrompt(activePromotions);
     const storeText = formatStoreProfileForPrompt(storeProfile);
     const mediaText = formatMediaForPrompt(incomingMedia);
 
-    const userPrompt = buildAgentPrompt(ctx, {
-      catalogText,
-      promosText,
+    const userPrompt = buildAgentPrompt(ctx, catalogText, promosText, {
       storeText,
       mediaText,
       retailState,
@@ -155,9 +154,9 @@ export async function runRetailAgent(
 
 function buildAgentPrompt(
   ctx: AgentContextBase,
+  catalogText: string,
+  promosText: string,
   parts: {
-    catalogText: string;
-    promosText: string;
     storeText: string;
     mediaText: string;
     retailState?: any;
@@ -189,11 +188,11 @@ function buildAgentPrompt(
     clientInfoParts.push(`Dirección: ${ctx.patientProfile.address}`);
 
   return `
+Promos activas:
+${promosText}
+
 Info del negocio (si existe):
 ${parts.storeText}
-
-Promos activas (si existen):
-${parts.promosText}
 
 Media entrante (si existe):
 ${parts.mediaText}
@@ -204,8 +203,8 @@ ${pendingText || "No hay pedidos pendientes."}
 Pedido pendiente principal:
 ${pendingSingleText}
 
-Catálogo / precios (si existe):
-${parts.catalogText}
+Catálogo del comercio (con precios si existen):
+${catalogText}
 
 Datos del cliente (si existen): ${
     clientInfoParts.join(" | ") || "sin datos aún"

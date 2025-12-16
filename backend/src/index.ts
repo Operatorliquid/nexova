@@ -3766,8 +3766,7 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
           name: p.name,
           price: p.price,
           unit: "u",
-          stock: p.quantity,
-          categories: p.categories,
+          keywords: Array.isArray(p.categories) ? p.categories : [],
         })) || [];
 
       const activePromotions =
@@ -3779,8 +3778,8 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
           })
         ).map((p) => ({
           title: p.title,
-          description: p.description,
-          validUntil: p.endDate ? p.endDate.toISOString().slice(0, 10) : null,
+          description: p.description || undefined,
+          validUntil: p.endDate ? p.endDate.toISOString().slice(0, 10) : undefined,
         })) || [];
 
       const retailClient = await ensureRetailClientForPhone({
@@ -3904,7 +3903,7 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
         orderBy: { createdAt: "desc" },
       });
 
-      const agentResult = await runWhatsappAgent({
+      const agentCtx = {
         text: bodyText,
         patientName: retailClient.fullName,
         patientPhone: retailClient.phone || phoneE164,
@@ -3954,8 +3953,6 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
           name: doctor.name,
           address: (doctor as any).clinicAddress || null,
           hours: (doctor as any).officeHours || null,
-          delivery: null,
-          paymentMethods: null,
           notes: (doctor as any).extraNotes || null,
         },
         incomingMedia: {
@@ -3963,7 +3960,15 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
           urls: mediaItems.map((m) => m.url).filter(Boolean),
           contentTypes: mediaItems.map((m) => m.contentType).filter(Boolean),
         },
+      };
+
+      console.log("[RETAIL_CTX]", {
+        catalog: Array.isArray(agentCtx.productCatalog) ? agentCtx.productCatalog.length : 0,
+        promos: Array.isArray(agentCtx.activePromotions) ? agentCtx.activePromotions.length : 0,
+        media: agentCtx.incomingMedia?.count ?? 0,
       });
+
+      const agentResult = await runWhatsappAgent(agentCtx);
 
       if (!agentResult) return res.sendStatus(200);
 
