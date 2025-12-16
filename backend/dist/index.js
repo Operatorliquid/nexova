@@ -2985,7 +2985,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                 description: p.description || undefined,
                 validUntil: p.endDate ? p.endDate.toISOString().slice(0, 10) : undefined,
             })) || [];
-            const EDITABLE_ORDER_STATUSES = ["PENDING", "PENDING_REVIEW", "FALTA_REVISION", "IN_REVIEW", "pending"];
+            const EDITABLE_ORDER_STATUSES = [client_1.OrderStatus.pending];
             const pendingOrdersForCtx = await prisma_1.prisma.order.findMany({
                 where: { doctorId: doctor.id, clientId: retailClient.id, status: { in: EDITABLE_ORDER_STATUSES } },
                 include: { items: { include: { product: true } } },

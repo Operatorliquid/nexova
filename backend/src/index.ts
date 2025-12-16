@@ -19,6 +19,7 @@ import {
   Product,
   BusinessType,
   PatientTagSeverity,
+  OrderStatus,
 } from "@prisma/client";
 import {
   formatConsultReasonAnswer,
@@ -3788,10 +3789,10 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
           validUntil: p.endDate ? p.endDate.toISOString().slice(0, 10) : undefined,
         })) || [];
 
-      const EDITABLE_ORDER_STATUSES = ["PENDING", "PENDING_REVIEW", "FALTA_REVISION", "IN_REVIEW", "pending"];
+      const EDITABLE_ORDER_STATUSES: OrderStatus[] = [OrderStatus.pending];
 
       const pendingOrdersForCtx = await prisma.order.findMany({
-        where: { doctorId: doctor.id, clientId: retailClient.id, status: { in: EDITABLE_ORDER_STATUSES as any } },
+        where: { doctorId: doctor.id, clientId: retailClient.id, status: { in: EDITABLE_ORDER_STATUSES } },
         include: { items: { include: { product: true } } },
         orderBy: { createdAt: "desc" },
         take: 3,
