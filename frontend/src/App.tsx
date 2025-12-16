@@ -1703,6 +1703,21 @@ const handleProfileFieldChange = useCallback(
   const [productCategoryModalOpen, setProductCategoryModalOpen] =
     useState(false);
   const [productCategoryInput, setProductCategoryInput] = useState("");
+  const [customProductCategories, setCustomProductCategories] = useState<string[]>([]);
+  const [removedProductCategories, setRemovedProductCategories] = useState<string[]>([]);
+  const productCategoryOptions = useMemo(
+    () => {
+      const removedSet = new Set(removedProductCategories.map((r) => r.toLowerCase()));
+      const base = PRODUCT_CATEGORY_OPTIONS.filter(
+        (opt) => !removedSet.has(opt.key.toLowerCase())
+      );
+      const custom = customProductCategories
+        .filter((label) => !removedSet.has(label.toLowerCase()))
+        .map((label) => ({ key: label, label }));
+      return [...base, ...custom];
+    },
+    [customProductCategories, removedProductCategories]
+  );
   const [productCategoryError, setProductCategoryError] = useState<
     string | null
   >(null);
@@ -3354,6 +3369,7 @@ const automationAppointmentPool = useMemo(() => {
         }
         setOrders((prev) => prev.filter((ord) => ord.id !== orderId));
         setOrderDeleteModalId(null);
+        setOrderModalId((prev) => (prev === orderId ? null : prev));
       } catch (err: any) {
         console.error("Error al eliminar pedido:", err);
         setOrdersError(err?.message || "No pudimos eliminar el pedido.");
@@ -3483,6 +3499,7 @@ const automationAppointmentPool = useMemo(() => {
       .filter(
         (entry) =>
           entry.outstanding > 0 &&
+          entry.order.status !== "cancelled" &&
           (entry.order.paymentStatus === "unpaid" || entry.order.paymentStatus === "partial") &&
           entry.ageDays >= threshold
       )
@@ -3933,18 +3950,70 @@ const automationAppointmentPool = useMemo(() => {
       setProductCategoryError("Usá un máximo de 40 caracteres.");
       return;
     }
-    const exists = productForm.categories.some(
-      (cat) => cat.toLowerCase() === trimmed.toLowerCase()
+    const normalized = trimmed.toLowerCase();
+    const baseMatch = PRODUCT_CATEGORY_OPTIONS.find(
+      (opt) =>
+        opt.key.toLowerCase() === normalized || opt.label.toLowerCase() === normalized
     );
-    if (exists) {
-      setProductCategoryError("Esa etiqueta ya está seleccionada.");
+
+    if (baseMatch) {
+      // Reaparece una base eliminada
+      setRemovedProductCategories((prev) =>
+        prev.filter((k) => k.toLowerCase() !== baseMatch.key.toLowerCase())
+      );
+      setProductForm((prev) => ({
+        ...prev,
+        categories: prev.categories.includes(baseMatch.key)
+          ? prev.categories
+          : [...prev.categories, baseMatch.key],
+      }));
+      handleCloseProductCategoryModal();
       return;
     }
+
+    const alreadyCustom = customProductCategories.some((c) => c.toLowerCase() === normalized);
+    if (alreadyCustom) {
+      setProductCategoryError("Esa etiqueta ya existe en la lista.");
+      return;
+    }
+
+    setRemovedProductCategories((prev) =>
+      prev.filter((k) => k.toLowerCase() !== normalized)
+    );
+    setCustomProductCategories((prev) => [...prev, trimmed]);
+
     setProductForm((prev) => ({
       ...prev,
       categories: [...prev.categories, trimmed],
     }));
     handleCloseProductCategoryModal();
+  };
+
+  const handleDeleteProductCategory = (key: string) => {
+    setCustomProductCategories((prev) =>
+      prev.filter((c) => c.toLowerCase() !== key.toLowerCase())
+    );
+    setRemovedProductCategories((prev) => [...prev, key]);
+    setProductForm((prev) => ({
+      ...prev,
+      categories: prev.categories.filter(
+        (cat) => cat.toLowerCase() !== key.toLowerCase()
+      ),
+    }));
+    setProductEditDrafts((prev) => {
+      const next = { ...prev };
+      Object.keys(next).forEach((id) => {
+        const draft = next[Number(id)];
+        if (!draft?.categories) return;
+        next[Number(id)] = {
+          ...draft,
+          categories: draft.categories.filter(
+            (cat) => cat.toLowerCase() !== key.toLowerCase()
+          ),
+        };
+      });
+      return next;
+    });
   };
 
   const openProductInlineEditor = (product: ProductItem) => {
@@ -8691,6 +8760,13 @@ return (
                       >
                         Actualizar lista
                       </button>
+                      <button
+                        type="button"
+                        className="inline-flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-semibold text-white bg-[linear-gradient(90deg,rgba(1,46,221,0.83)_0%,rgba(54,95,255,0.55)_100%)] shadow-[0_0_12px_rgba(54,95,255,0.35)] hover:shadow-[0_0_16px_rgba(54,95,255,0.5)] border border-white/10"
+                        onClick={handleOpenProductCategoryModal}
+                      >
+                        <span>Etiquetas</span>
+                      </button>
                     </div>
                   </section>
 
@@ -9037,7 +9113,7 @@ return (
                                           Categorías
                                         </label>
                                         <div className="flex flex-wrap gap-2">
-                                          {PRODUCT_CATEGORY_OPTIONS.map((option) => {
+                                          {productCategoryOptions.map((option) => {
                                             const active =
                                               productEditDrafts[product.id]?.categories?.includes(
                                                 option.key
@@ -12114,9 +12190,20 @@ return (
                             onChange={(e) => setDebtFilterInput(Number(e.target.value))}
                             className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-white/20"
                           >
-                            {[1, 2, 3, 7, 14, 30].map((days) => (
-                              <option key={days} value={days}>
-                                {days} {days === 1 ? "día" : "días"}
+                            {[
+                              { days: 1, label: "1 día" },
+                              { days: 2, label: "2 días" },
+                              { days: 3, label: "3 días" },
+                              { days: 7, label: "1 semana" },
+                              { days: 14, label: "2 semanas" },
+                              { days: 30, label: "1 mes" },
+                              { days: 60, label: "2 meses" },
+                              { days: 90, label: "3 meses" },
+                              { days: 120, label: "4 meses" },
+                              { days: 365, label: "1 año" },
+                            ].map((opt) => (
+                              <option key={opt.days} value={opt.days}>
+                                {opt.label}
                               </option>
                             ))}
                           </select>
@@ -12219,8 +12306,10 @@ return (
                                   <button
                                     type="button"
                                     className="btn btn-outline btn-sm"
-                                    onClick={() => {
-                                      setActiveSection("orders");
+                                    onClick={async () => {
+                                      if (!orders.find((o) => o.id === order.id)) {
+                                        await fetchOrders();
+                                      }
                                       setOrderModalId(order.id);
                                     }}
                                   >
@@ -13803,7 +13892,7 @@ return (
                 Seleccioná las etiquetas que mejor describen el producto.
               </p>
               <div className="flex flex-wrap gap-2">
-                {PRODUCT_CATEGORY_OPTIONS.map((option) => {
+                {productCategoryOptions.map((option) => {
                   const active = productForm.categories.includes(option.key);
                   return (
                     <button
@@ -13902,6 +13991,35 @@ return (
               {productCategoryError && (
                 <p className="text-sm text-rose-400">{productCategoryError}</p>
               )}
+            </div>
+            <div className="space-y-2">
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">
+                Etiquetas actuales
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {productCategoryOptions.map((option) => {
+                  const active = productForm.categories.includes(option.key);
+                  return (
+                    <div
+                      key={`cat-pill-${option.key}`}
+                      className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-[11px] border ${
+                        active
+                          ? "border-transparent text-white shadow-[0_0_12px_rgba(54,95,255,0.35)] bg-[linear-gradient(90deg,rgba(1,46,221,0.83)_0%,rgba(54,95,255,0.35)_100%)]"
+                          : "border-white/10 text-slate-300 bg-white/5"
+                      }`}
+                    >
+                      <span>{option.label}</span>
+                      <button
+                        type="button"
+                        className="text-xs text-rose-200 hover:text-rose-100"
+                        onClick={() => handleDeleteProductCategory(option.key)}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
             <div className="flex justify-end gap-2">
               <button
