@@ -738,7 +738,6 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
   }
 
   const missingProducts: string[] = [];
-  const stockIssues: string[] = [];
   const resolvedItems: Array<{ productId: number; quantity: number; name: string }> =
     [];
 
@@ -792,19 +791,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
 
   resolvedItems.forEach((ri) => {
     const product = products.find((p) => p.id === ri.productId);
-    if (product && product.quantity < ri.quantity) {
-      stockIssues.push(`${product.name} (stock ${product.quantity})`);
-    }
   });
-
-  if (stockIssues.length > 0) {
-    await sendMessage(
-      `No tengo stock suficiente para: ${stockIssues.join(
-        ", "
-      )}. Decime si querés ajustar cantidades o reemplazar.`
-    );
-    return true;
-  }
 
   // Buscar pedidos pendientes (para que el agente decida cuál tocar)
   const pendingOrders = await prisma.order.findMany({
@@ -812,13 +799,6 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
     include: { items: true },
     orderBy: { createdAt: "desc" },
   });
-
-  const target = pendingOrders[0] ?? null;
-  const targetOrderId = target?.id ?? null;
-
-  if (target && target.inventoryDeducted) {
-    await restockOrderInventory(target);
-  }
 
   const wantsEdit =
     /\b(editar|cambiar|modificar|ajustar|actualizar)\b/i.test(rawText || "") &&
@@ -844,13 +824,71 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
     action.mode === "merge" ||
     /\b(sum(ar|ame|á)|agreg(ar|ame|á|alas)|añad(ir|ime|í)|mas|\+)\b/i.test(rawText);
 
-  const itemsToSave = resolvedItems;
+  const target = pendingOrders[0] ?? null;
+  const targetOrderId = target?.id ?? null;
+
+  if (target && target.inventoryDeducted) {
+    await restockOrderInventory(target);
+  }
+
+  // Reducimos cantidades de forma determinística
+  const currentQuantities = new Map<number, number>();
+  if (target?.items) {
+    target.items.forEach((it) => currentQuantities.set(it.productId, it.quantity));
+  }
+
+  for (const it of resolvedItems) {
+    const baseOp = (it as any).op as string | undefined;
+    const op: "add" | "remove" | "set" =
+      baseOp === "remove" || baseOp === "set" ? baseOp : "add";
+    const qty = Math.max(0, Math.trunc((it as any).quantity || 0));
+    const prev = currentQuantities.get(it.productId) ?? 0;
+
+    if (op === "remove") {
+      currentQuantities.set(it.productId, 0);
+      continue;
+    }
+    if (op === "set") {
+      currentQuantities.set(it.productId, qty);
+      continue;
+    }
+    // add (default)
+    if (qty > 0) {
+      currentQuantities.set(it.productId, prev + qty);
+    }
+  }
+
+  const finalItems = Array.from(currentQuantities.entries())
+    .filter(([, qty]) => qty > 0)
+    .map(([productId, quantity]) => ({ productId, quantity }));
+
+  if (finalItems.length === 0) {
+    await sendMessage("No quedó ningún producto en el pedido. Decime qué querés agregar.");
+    return true;
+  }
+
+  // Stock check con cantidades finales
+  const stockIssues: string[] = [];
+  finalItems.forEach((item) => {
+    const product = products.find((p) => p.id === item.productId);
+    if (product && product.quantity < item.quantity) {
+      stockIssues.push(product.name);
+    }
+  });
+  if (stockIssues.length > 0) {
+    await sendMessage(
+      `No tengo stock suficiente para: ${stockIssues.join(
+        ", "
+      )}. Decime si querés ajustar cantidades o reemplazar.`
+    );
+    return true;
+  }
 
   const upsert = await upsertRetailOrder({
     doctorId: doctor.id,
     clientId: client.id,
-    items: itemsToSave,
-    mode: addMode ? "merge" : "set",
+    items: finalItems,
+    mode: "replace",
     status: "pending", // siempre queda en revisión; la confirmación real la hace el dueño en el panel
     existingOrderId: targetOrderId,
     customerName:

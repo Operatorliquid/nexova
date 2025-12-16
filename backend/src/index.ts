@@ -3759,10 +3759,29 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
           await prisma.product.findMany({
             where: { doctorId: doctor.id },
             orderBy: { name: "asc" },
-            select: { name: true },
-            take: 100,
+            select: { name: true, price: true, quantity: true, categories: true },
+            take: 120,
           })
-        ).map((p) => p.name) || [];
+        ).map((p) => ({
+          name: p.name,
+          price: p.price,
+          unit: "u",
+          stock: p.quantity,
+          categories: p.categories,
+        })) || [];
+
+      const activePromotions =
+        (
+          await prisma.promotion.findMany({
+            where: { doctorId: doctor.id, isActive: true },
+            orderBy: { createdAt: "desc" },
+            take: 20,
+          })
+        ).map((p) => ({
+          title: p.title,
+          description: p.description,
+          validUntil: p.endDate ? p.endDate.toISOString().slice(0, 10) : null,
+        })) || [];
 
       const retailClient = await ensureRetailClientForPhone({
         doctorId: doctor.id,
@@ -3930,6 +3949,20 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
           slotMinutes: null,
         },
         productCatalog,
+        activePromotions,
+        storeProfile: {
+          name: doctor.name,
+          address: (doctor as any).clinicAddress || null,
+          hours: (doctor as any).officeHours || null,
+          delivery: null,
+          paymentMethods: null,
+          notes: (doctor as any).extraNotes || null,
+        },
+        incomingMedia: {
+          count: mediaItems.length,
+          urls: mediaItems.map((m) => m.url).filter(Boolean),
+          contentTypes: mediaItems.map((m) => m.contentType).filter(Boolean),
+        },
       });
 
       if (!agentResult) return res.sendStatus(200);

@@ -9,6 +9,41 @@ export type AgentProfileUpdates = {
   address?: string | null;
 };
 
+// =====================
+// Retail (comercios)
+// =====================
+export type RetailOrderItemOp = "add" | "remove" | "set";
+
+export type RetailOrderItem = {
+  /** Texto tal cual lo dijo el cliente (puede venir con typos). */
+  name: string;
+  /** Nombre normalizado (para match con catálogo). Si no aplica, repetir `name`. */
+  normalizedName?: string;
+  /** Cantidad (para op=remove puede omitirse). */
+  quantity?: number;
+  /** Nota/aclaración: sabor, tamaño, etc. */
+  note?: string;
+  /** Operación a aplicar sobre el pedido actual. */
+  op?: RetailOrderItemOp;
+};
+
+export type RetailClientInfo = {
+  fullName?: string;
+  dni?: string;
+  address?: string;
+};
+
+export type RetailPaymentProof = {
+  /** Si llegó media (foto/pdf) por WhatsApp. */
+  hasMedia?: boolean;
+  /** URLs de media (si las tenés en contexto). */
+  mediaUrls?: string[];
+  /** Monto detectado (si el cliente lo escribió). */
+  amount?: number | null;
+  /** Método: transferencia/MP/efectivo/etc. */
+  method?: string | null;
+};
+
 type AgentToolActionBase = {
   profileUpdates?: AgentProfileUpdates | null;
 };
@@ -31,14 +66,42 @@ export type AgentToolAction =
   | ({
       type: "retail_upsert_order";
       reply: string;
-      items: Array<{ name: string; quantity: number }>;
+      /** Items/ops mencionados en ESTE mensaje. */
+      items: RetailOrderItem[];
       status?: "pending" | "confirmed" | "cancelled";
+      /** merge=agregar/modificar; replace=reemplazar todo (solo si el cliente lo pidió explícito). */
       mode?: "replace" | "merge";
-      clientInfo?: { fullName?: string; dni?: string; address?: string };
+      clientInfo?: RetailClientInfo;
+      /** Si el cliente refiere a un pedido específico (#12). */
+      orderSequenceNumber?: number | null;
+      /** Texto corto: qué quiso hacer. */
+      intent?: string;
+      /** 0..1: qué tan seguro estás. */
+      confidence?: number;
+    } & AgentToolActionBase)
+  | ({
+      type: "retail_confirm_order";
+      reply: string;
+      orderSequenceNumber?: number | null;
+      intent?: string;
+      confidence?: number;
+    } & AgentToolActionBase)
+  | ({
+      type: "retail_attach_payment_proof";
+      reply: string;
+      orderSequenceNumber?: number | null;
+      paymentProof?: RetailPaymentProof;
+      /** Si falta info para asignar el comprobante, el backend puede guardar un "awaiting". */
+      needsOrderReference?: boolean;
+      intent?: string;
+      confidence?: number;
     } & AgentToolActionBase)
   | ({
       type: "retail_cancel_order";
       reply: string;
+      orderSequenceNumber?: number | null;
+      intent?: string;
+      confidence?: number;
     } & AgentToolActionBase);
 
 export type AgentExecutionResult = {

@@ -138,7 +138,11 @@ export type WhatsappAgentContext = {
     additionalNotes: string | null;
     slotMinutes?: number | null;
   };
-  productCatalog?: string[];
+  productCatalog?: any;
+  activePromotions?: any;
+  storeProfile?: any;
+  incomingMedia?: any;
+  retailConversationState?: any;
 };
 
 

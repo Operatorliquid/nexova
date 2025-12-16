@@ -2320,10 +2320,6 @@ const [automationMessages, setAutomationMessages] = useState<
   const [orderPaymentFilter, setOrderPaymentFilter] = useState<
     "all" | "unpaid" | "partial" | "paid"
   >("all");
-  const [orderPaymentStatus, setOrderPaymentStatus] = useState<"unpaid" | "paid" | "partial">(
-    "unpaid"
-  );
-  const [orderPaymentMode, setOrderPaymentMode] = useState<"full" | "custom">("full");
   const [orderPaymentCustom, setOrderPaymentCustom] = useState<number>(0);
   const [orderPaymentDirty, setOrderPaymentDirty] = useState(false);
   const [orderAttachmentUploadingId, setOrderAttachmentUploadingId] = useState<number | null>(null);
@@ -3392,13 +3388,6 @@ const automationAppointmentPool = useMemo(() => {
     }
     orderPaymentHydrateRef.current = { orderId: ord.id, version };
     const paidAmount = ord.paidAmount ?? 0;
-    const status = ord.paymentStatus === "paid" ? "paid" : ord.paymentStatus === "partial" ? "partial" : "unpaid";
-    setOrderPaymentStatus(status as "unpaid" | "partial" | "paid");
-    if (status === "paid" && paidAmount >= ord.totalAmount) {
-      setOrderPaymentMode("full");
-    } else {
-      setOrderPaymentMode("custom");
-    }
     setOrderPaymentCustom(paidAmount || 0);
     setOrderPaymentDirty(false);
   }, [orderModalId, orders, orderUpdatingId]);
@@ -11576,116 +11565,103 @@ return (
                               </div>
                             </div>
                           ) : orderModalTab === "payments" ? (
-                            <div className="space-y-2">
-                              <p className="text-sm font-semibold text-slate-900">Estado de pago</p>
-                              <div className="flex flex-wrap gap-2">
-                                <button
-                                  type="button"
-                                  className={`btn btn-sm ${
-                                    orderPaymentStatus === "unpaid" ? "btn-danger" : "btn-outline"
-                                  }`}
-                                  onClick={() => {
-                                    setOrderPaymentDirty(true);
-                                    setOrderPaymentStatus("unpaid");
-                                    setOrderPaymentMode("custom");
-                                    setOrderPaymentCustom(0);
-                                    handleUpdateOrderStatus(ord.id, ord.status, ord, {
-                                      paymentStatus: "unpaid",
-                                      paidAmount: 0,
-                                      suppressPrint: true,
-                                    });
-                                  }}
-                                  disabled={orderUpdatingId === orderModalId}
-                                >
-                                  No pagado
-                                </button>
-                                <button
-                                  type="button"
-                                  className={`btn btn-sm ${
-                                    orderPaymentStatus !== "unpaid" ? "btn-primary" : "btn-outline"
-                                  }`}
-                                  onClick={() => {
-                                    setOrderPaymentDirty(true);
-                                    setOrderPaymentStatus("paid");
-                                    setOrderPaymentMode("full");
-                                    setOrderPaymentCustom(ord.totalAmount);
-                                    handleUpdateOrderStatus(ord.id, ord.status, ord, {
-                                      paymentStatus: "paid",
-                                      paidAmount: ord.totalAmount,
-                                      suppressPrint: true,
-                                    });
-                                  }}
-                                  disabled={orderUpdatingId === orderModalId}
-                                >
-                                  Pagado
-                                </button>
-                              </div>
-
-                              {orderPaymentStatus !== "unpaid" && (
-                                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2 text-sm text-slate-700">
-                                  <div className="flex items-center gap-3 flex-wrap">
-                                    <label className="flex items-center gap-1">
-                                      <input
-                                        type="radio"
-                                        checked={orderPaymentMode === "full"}
-                                        onChange={() => {
-                                          setOrderPaymentDirty(true);
-                                          setOrderPaymentMode("full");
-                                          setOrderPaymentCustom(ord.totalAmount);
-                                          setOrderPaymentStatus("paid");
-                                          handleUpdateOrderStatus(ord.id, ord.status, ord, {
-                                            paymentStatus: "paid",
-                                            paidAmount: ord.totalAmount,
-                                            suppressPrint: true,
-                                          });
-                                        }}
-                                      />
-                                      Monto total (${ord.totalAmount.toLocaleString("es-AR")})
-                                    </label>
-                                    <label className="flex items-center gap-1">
-                                      <input
-                                        type="radio"
-                                        checked={orderPaymentMode === "custom"}
-                                        onChange={() => {
-                                          setOrderPaymentDirty(true);
-                                          setOrderPaymentMode("custom");
-                                        }}
-                                      />
-                                      Custom
-                                    </label>
-                                    {orderPaymentMode === "custom" && (
-                                      <input
-                                        type="number"
-                                        className="w-28 rounded border border-slate-300 px-2 py-1 text-right"
-                                        value={orderPaymentCustom}
-                                        onChange={(e) => {
-                                          setOrderPaymentDirty(true);
-                                          const val = Math.max(0, Number(e.target.value) || 0);
-                                          const status =
-                                            val === 0
-                                              ? "unpaid"
-                                              : val >= ord.totalAmount
-                                              ? "paid"
-                                              : "partial";
-                                          setOrderPaymentCustom(val);
-                                          setOrderPaymentStatus(
-                                            status as "unpaid" | "partial" | "paid"
-                                          );
-                                          handleUpdateOrderStatus(ord.id, ord.status, ord, {
-                                            paymentStatus: status,
-                                            paidAmount: val,
-                                            suppressPrint: true,
-                                          });
-                                        }}
-                                      />
-                                    )}
-                                  </div>
+                            <div className="space-y-3">
+                              <div className="flex items-center justify-between gap-3">
+                                <div>
+                                  <p className="text-sm font-semibold text-slate-900">Pagos</p>
                                   <p className="text-xs text-slate-500">
-                                    Pagado: ${orderPaymentCustom.toLocaleString("es-AR")} / $
+                                    Pagado: ${ord.paidAmount.toLocaleString("es-AR")} / $
                                     {ord.totalAmount.toLocaleString("es-AR")}
                                   </p>
                                 </div>
-                              )}
+                                <div className="flex items-center gap-2 text-xs">
+                                  <span
+                                    className={`px-3 py-1 rounded-full border ${
+                                      ord.paymentStatus === "paid"
+                                        ? "border-emerald-500 text-emerald-700 bg-emerald-50"
+                                        : ord.paymentStatus === "partial"
+                                        ? "border-amber-400 text-amber-700 bg-amber-50"
+                                        : "border-slate-400 text-slate-700 bg-slate-100"
+                                    }`}
+                                  >
+                                    {ord.paymentStatus === "paid"
+                                      ? "Pagado"
+                                      : ord.paymentStatus === "partial"
+                                      ? "Pago parcial"
+                                      : "No pagado"}
+                                  </span>
+                                  <span className="text-[11px] text-slate-500">
+                                    Falta: $
+                                    {Math.max(0, ord.totalAmount - (ord.paidAmount || 0)).toLocaleString(
+                                      "es-AR"
+                                    )}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                                <p className="text-xs text-slate-600">
+                                  Agregá un pago parcial o total. Podés registrar varios pagos (se suman).
+                                </p>
+                                <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    className="w-full sm:w-36 rounded border border-slate-300 px-3 py-2 text-right text-sm"
+                                    value={orderPaymentCustom}
+                                    onChange={(e) => {
+                                      const val = Math.max(0, Number(e.target.value) || 0);
+                                      setOrderPaymentCustom(val);
+                                      setOrderPaymentDirty(true);
+                                    }}
+                                    placeholder="Monto a agregar"
+                                  />
+                                  <div className="flex items-center gap-2">
+                                    <button
+                                      type="button"
+                                      className="btn btn-primary btn-sm disabled:opacity-60"
+                                      onClick={() => {
+                                        const add = Math.max(0, orderPaymentCustom || 0);
+                                        const newPaid = Math.max(0, (ord.paidAmount || 0) + add);
+                                        const status =
+                                          newPaid === 0
+                                            ? "unpaid"
+                                            : newPaid >= ord.totalAmount
+                                            ? "paid"
+                                            : "partial";
+                                        handleUpdateOrderStatus(ord.id, ord.status, ord, {
+                                          paymentStatus: status,
+                                          paidAmount: newPaid,
+                                          suppressPrint: true,
+                                        });
+                                      }}
+                                      disabled={orderUpdatingId === orderModalId}
+                                    >
+                                      Agregar pago
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="btn btn-ghost btn-sm"
+                                      onClick={() => {
+                                        handleUpdateOrderStatus(ord.id, ord.status, ord, {
+                                          paymentStatus: "unpaid",
+                                          paidAmount: 0,
+                                          suppressPrint: true,
+                                        });
+                                        setOrderPaymentCustom(0);
+                                      }}
+                                      disabled={orderUpdatingId === orderModalId}
+                                    >
+                                      Marcar no pagado
+                                    </button>
+                                  </div>
+                                </div>
+                                <p className="text-[11px] text-slate-500">
+                                  Se suma al total pagado. Pagado actual: $
+                                  {ord.paidAmount.toLocaleString("es-AR")}
+                                </p>
+                              </div>
+
                               {(ord.paymentStatus === "unpaid" || ord.paymentStatus === "partial") && (
                                 <div className="pt-2">
                                   <button

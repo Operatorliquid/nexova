@@ -47,6 +47,7 @@ export function matchProductName(
   products: Product[]
 ): { product: Product | null; score: number } {
   const queryNorm = normalizeText(query);
+  const queryNoSpace = queryNorm.replace(/\s+/g, "");
   const queryTokens = tokenizeProductQuery(query);
 
   let best: { product: Product | null; score: number } = {
@@ -57,9 +58,14 @@ export function matchProductName(
   for (const product of products) {
     const nameNorm = normalizeText(product.name);
     const nameTokens = tokenizeProductQuery(product.name);
+    const nameNoSpace = nameNorm.replace(/\s+/g, "");
+    const aliases = buildProductAliases(nameNorm, nameNoSpace);
     let score = 0;
 
     if (nameNorm.includes(queryNorm) || queryNorm.includes(nameNorm)) {
+      score += 3;
+    }
+    if (nameNoSpace.includes(queryNoSpace) || queryNoSpace.includes(nameNoSpace)) {
       score += 3;
     }
 
@@ -67,6 +73,17 @@ export function matchProductName(
       if (!token) continue;
       if (nameTokens.includes(token) || nameNorm.includes(token)) {
         score += 1;
+      }
+    }
+
+    // Alias y fuzzy leve
+    for (const alias of aliases) {
+      if (alias.includes(queryNoSpace) || queryNoSpace.includes(alias)) {
+        score += 2;
+      } else {
+        const dist = levenshtein(alias, queryNoSpace);
+        if (dist === 1) score += 1.5;
+        else if (dist === 2) score += 1;
       }
     }
 
@@ -409,4 +426,43 @@ function tokenizeProductQuery(value: string): string[] {
     .split(/[\s,.;:]+/)
     .map((t) => t.replace(/s$/, ""))
     .filter((t) => t.length > 2 && !stopwords.has(t));
+}
+
+function buildProductAliases(nameNorm: string, nameNoSpace: string): string[] {
+  const aliases = new Set<string>();
+  aliases.add(nameNoSpace);
+  const base = nameNorm.replace(/\s+/g, "");
+  aliases.add(base);
+
+  if (/coca/.test(nameNorm)) {
+    aliases.add("cocacola");
+    aliases.add("coca");
+  }
+  if (/manaos/.test(nameNorm)) {
+    aliases.add("manaoscola");
+    aliases.add("manaos");
+  }
+  if (/yerba/.test(nameNorm)) {
+    aliases.add("yerbamate");
+    aliases.add("yrba");
+  }
+  return Array.from(aliases);
+}
+
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  const v0 = new Array(b.length + 1).fill(0).map((_, i) => i);
+  const v1 = new Array(b.length + 1).fill(0);
+
+  for (let i = 0; i < a.length; i++) {
+    v1[0] = i + 1;
+    for (let j = 0; j < b.length; j++) {
+      const cost = a[i] === b[j] ? 0 : 1;
+      v1[j + 1] = Math.min(v1[j] + 1, v0[j + 1] + 1, v0[j] + cost);
+    }
+    for (let j = 0; j < v0.length; j++) v0[j] = v1[j];
+  }
+  return v1[b.length];
 }
