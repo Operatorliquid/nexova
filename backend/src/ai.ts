@@ -180,7 +180,18 @@ export type WhatsappAgentContext = {
 export async function runWhatsappAgent(
   ctx: WhatsappAgentContext
 ): Promise<AgentResult | null> {
-  const text = ctx.text?.trim();
+  const rawText = ctx.text ?? "";
+  const text = rawText.trim();
+  const hasMedia = Boolean(ctx.incomingMedia?.count && ctx.incomingMedia.count > 0);
+
+  if (!text && ctx.businessType === "RETAIL" && hasMedia) {
+    return {
+      replyToPatient:
+        "Recibí el comprobante ✅ ¿A qué pedido corresponde? Decime el número (ej: 6).",
+      action: { type: "NONE" },
+    } as any;
+  }
+
   if (!text) {
     return {
       replyToPatient:

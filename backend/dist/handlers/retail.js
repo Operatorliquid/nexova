@@ -152,6 +152,78 @@ const parseOfficeHoursWindows = (raw) => {
     }
     return windows.sort((a, b) => a.startMinute - b.startMinute);
 };
+const isYes = (txt) => {
+    const t = (txt || "").trim().toLowerCase();
+    return /^(si|sí|sisi|ok|dale|listo|confirmo|confirmar|de una|obvio)$/.test(t);
+};
+const isNo = (txt) => {
+    const t = (txt || "").trim().toLowerCase();
+    return /^(no|nop|nah|negativo)$/.test(t);
+};
+function extractOrderSeqFromText(text) {
+    if (!text)
+        return null;
+    const m1 = text.match(/pedido\s*#?\s*(\d+)/i);
+    if (m1 === null || m1 === void 0 ? void 0 : m1[1])
+        return Number(m1[1]);
+    const m2 = text.match(/#\s*(\d+)/);
+    if (m2 === null || m2 === void 0 ? void 0 : m2[1])
+        return Number(m2[1]);
+    return null;
+}
+function parseProofCandidateFromLastBotMessage(lastBotMsg) {
+    if (!lastBotMsg)
+        return null;
+    const looksLikeProof = /(recib[ií].*(archivo|comprobante)|pdf|transferencia|mp|mercado\s*pago)/i.test(lastBotMsg);
+    if (!looksLikeProof)
+        return null;
+    return extractOrderSeqFromText(lastBotMsg);
+}
+// Estado en memoria para "estoy esperando #pedido para asignar comprobante"
+const awaitingProofMap = new Map();
+async function assignLatestUnassignedProofToOrder(params) {
+    const { doctorId, clientId, orderSequenceNumber } = params;
+    const target = await prisma_1.prisma.order.findFirst({
+        where: { doctorId, clientId, sequenceNumber: orderSequenceNumber },
+        select: { id: true },
+    });
+    if (!target)
+        return false;
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+    const latestAtt = await prisma_1.prisma.orderAttachment.findFirst({
+        where: {
+            order: { doctorId, clientId },
+            createdAt: { gte: tenMinutesAgo },
+        },
+        orderBy: { createdAt: "desc" },
+        select: { id: true, orderId: true },
+    });
+    if (!latestAtt)
+        return false;
+    await prisma_1.prisma.orderAttachment.update({
+        where: { id: latestAtt.id },
+        data: { orderId: target.id },
+    });
+    return true;
+}
+async function setAwaitingProofOrderNumber(params) {
+    awaitingProofMap.set(`${params.doctorId}:${params.clientId}`, Date.now());
+}
+async function clearAwaitingProofOrderNumber(params) {
+    awaitingProofMap.delete(`${params.doctorId}:${params.clientId}`);
+}
+async function getAwaitingProofOrderNumber(params) {
+    const key = `${params.doctorId}:${params.clientId}`;
+    const ts = awaitingProofMap.get(key);
+    if (!ts)
+        return false;
+    // Expira a los 15 minutos
+    if (Date.now() - ts > 15 * 60 * 1000) {
+        awaitingProofMap.delete(key);
+        return false;
+    }
+    return true;
+}
 async function handleRetailAgentAction(params) {
     var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s;
     const { doctor, patient, retailClient, action, replyToPatient, phoneE164, doctorNumber, doctorWhatsappConfig, rawText, } = params;
@@ -461,6 +533,66 @@ async function handleRetailAgentAction(params) {
                 `Si está OK respondé *CONFIRMAR*. Si querés cambiar algo, decime qué sumás/quitás.`);
             return true;
         }
+    }
+    const msgText = (rawText || "").trim();
+    // ✅ Asignación de comprobantes (intercepta antes de confirmar pedido)
+    const lastBotMsgRow = await prisma_1.prisma.message.findFirst({
+        where: {
+            doctorId: doctor.id,
+            retailClientId: client.id,
+            direction: "outgoing",
+            body: { not: null },
+        },
+        orderBy: { createdAt: "desc" },
+        select: { body: true },
+    });
+    const lastBotMsg = (lastBotMsgRow === null || lastBotMsgRow === void 0 ? void 0 : lastBotMsgRow.body) || "";
+    const candidateSeq = parseProofCandidateFromLastBotMessage(lastBotMsg);
+    if (candidateSeq && (isYes(msgText) || isNo(msgText))) {
+        if (isYes(msgText)) {
+            const ok = await assignLatestUnassignedProofToOrder({
+                doctorId: doctor.id,
+                clientId: client.id,
+                orderSequenceNumber: candidateSeq,
+            });
+            if (!ok) {
+                await sendMessage(`No pude asignar el comprobante al pedido #${candidateSeq}. Decime el número de pedido de nuevo por favor.`);
+                return true;
+            }
+            await clearAwaitingProofOrderNumber({ doctorId: doctor.id, clientId: client.id });
+            await sendMessage(`Listo ✅ Ya cargué tu comprobante para el pedido #${candidateSeq}.`);
+            return true;
+        }
+        await setAwaitingProofOrderNumber({ doctorId: doctor.id, clientId: client.id });
+        await sendMessage("Perfecto. ¿Para qué pedido es? Mandame el número (ej: 6).");
+        return true;
+    }
+    const awaitingProofOrderNumber = await getAwaitingProofOrderNumber({
+        doctorId: doctor.id,
+        clientId: client.id,
+    });
+    if (awaitingProofOrderNumber) {
+        const seq = extractOrderSeqFromText(msgText) ||
+            (() => {
+                const m = msgText.match(/\b(\d{1,6})\b/);
+                return (m === null || m === void 0 ? void 0 : m[1]) ? Number(m[1]) : null;
+            })();
+        if (!seq) {
+            await sendMessage("Decime el número de pedido (ej: 6).");
+            return true;
+        }
+        const ok = await assignLatestUnassignedProofToOrder({
+            doctorId: doctor.id,
+            clientId: client.id,
+            orderSequenceNumber: seq,
+        });
+        if (!ok) {
+            await sendMessage(`No encontré tu pedido #${seq}. Mandame el número correcto (ej: 6) o decime “pedido #...”.`);
+            return true;
+        }
+        await clearAwaitingProofOrderNumber({ doctorId: doctor.id, clientId: client.id });
+        await sendMessage(`Listo ✅ Asigné el comprobante al pedido #${seq}.`);
+        return true;
     }
     const isCustomerConfirm = isConfirmText(rawText || "");
     if (isCustomerConfirm) {

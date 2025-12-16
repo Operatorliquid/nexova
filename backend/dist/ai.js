@@ -45,8 +45,16 @@ async function checkOpenAIConnectivity() {
  * Agente principal: intenta usar OpenAI, si falla cae a heurística simple.
  */
 async function runWhatsappAgent(ctx) {
-    var _a;
-    const text = (_a = ctx.text) === null || _a === void 0 ? void 0 : _a.trim();
+    var _a, _b;
+    const rawText = (_a = ctx.text) !== null && _a !== void 0 ? _a : "";
+    const text = rawText.trim();
+    const hasMedia = Boolean(((_b = ctx.incomingMedia) === null || _b === void 0 ? void 0 : _b.count) && ctx.incomingMedia.count > 0);
+    if (!text && ctx.businessType === "RETAIL" && hasMedia) {
+        return {
+            replyToPatient: "Recibí el comprobante ✅ ¿A qué pedido corresponde? Decime el número (ej: 6).",
+            action: { type: "NONE" },
+        };
+    }
     if (!text) {
         return {
             replyToPatient: "Te leo, ¿podés escribirme en texto para ayudarte mejor?",
