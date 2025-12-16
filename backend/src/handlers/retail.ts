@@ -289,7 +289,7 @@ export async function assignLatestUnassignedProofToOrder(params: {
       doctorId,
       clientId,
       orderId: null,
-      status: PaymentProofStatus.unassigned,
+      status: { in: [PaymentProofStatus.unassigned, PaymentProofStatus.duplicate] },
       createdAt: { gte: tenMinutesAgo },
     },
     orderBy: { createdAt: "desc" },
@@ -820,11 +820,16 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
       });
 
       if (!ok) {
-        await sendMessage(
-          `No pude asignar el comprobante al pedido #${candidateSeq}. Decime el número de pedido de nuevo por favor.`
-        );
-        return true;
-      }
+  // ✅ quedamos en modo “esperando #pedido” para que el “5” no dispare el flujo de productos
+  await setAwaitingProofOrderNumber({ doctorId: doctor.id, clientId: client.id });
+
+  await sendMessage(
+    `No pude asignarlo automático al pedido #${candidateSeq}. ` +
+    `Mandame el número de pedido de nuevo (ej: 5). ` +
+    `Si podés, reenviá el comprobante así lo agarro seguro.`
+  );
+  return true;
+}
 
       await clearAwaitingProofOrderNumber({ doctorId: doctor.id, clientId: client.id });
       await sendMessage(`Listo ✅ Ya cargué tu comprobante para el pedido #${candidateSeq}.`);
@@ -891,7 +896,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
       const summary =
         pending.items.map((it) => `• ${it.quantity} x ${it.product.name}`).join("\n") || "Pedido vacío";
       await sendMessage(
-        `Ya estaba enviado ✅.\n\nPedido #${pending.sequenceNumber}:\n${summary}\nTotal: $${pending.totalAmount}`
+        `Ya esta enviado ✅.\n\nPedido #${pending.sequenceNumber}:\n${summary}\nTotal: $${pending.totalAmount}`
       );
       return true;
     }

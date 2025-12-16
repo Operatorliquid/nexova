@@ -3962,7 +3962,7 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
                   currency: extraction?.currency ?? null,
                   reference: extraction?.reference ?? null,
                   proofDate,
-                  status: duplicateOfId ? "duplicate" : "unassigned",
+                  status: "unassigned",
                   duplicateOfId: duplicateOfId ?? undefined,
                 },
               });
