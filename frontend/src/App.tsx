@@ -1676,6 +1676,7 @@ const handleProfileFieldChange = useCallback(
     []
   );
   const [products, setProducts] = useState<ProductItem[]>([]);
+  const [ordersVersion, setOrdersVersion] = useState(0);
   const [productsLoading, setProductsLoading] = useState(false);
   const [productsError, setProductsError] = useState<string | null>(null);
   const [productForm, setProductForm] = useState(() => ({
@@ -3028,6 +3029,7 @@ const automationAppointmentPool = useMemo(() => {
       }
       const json = await res.json();
       setOrders(Array.isArray(json.orders) ? json.orders : []);
+      setOrdersVersion((v) => v + 1);
     } catch (err: any) {
       console.error("Error al cargar pedidos:", err);
       setOrdersError(err?.message || "No pudimos cargar los pedidos.");
@@ -3368,8 +3370,10 @@ const automationAppointmentPool = useMemo(() => {
           throw new Error(errJson?.error || "No pudimos eliminar el pedido.");
         }
         setOrders((prev) => prev.filter((ord) => ord.id !== orderId));
+        setOrdersVersion((v) => v + 1);
         setOrderDeleteModalId(null);
         setOrderModalId((prev) => (prev === orderId ? null : prev));
+        await fetchOrders();
       } catch (err: any) {
         console.error("Error al eliminar pedido:", err);
         setOrdersError(err?.message || "No pudimos eliminar el pedido.");
@@ -3377,7 +3381,7 @@ const automationAppointmentPool = useMemo(() => {
         setOrderUpdatingId(null);
       }
     },
-    [token, businessType]
+    [token, businessType, fetchOrders]
   );
 
   useEffect(() => {
@@ -3438,9 +3442,12 @@ const automationAppointmentPool = useMemo(() => {
 
   useEffect(() => {
     if ((activeSection === "orders" || activeSection === "debts") && businessType === "RETAIL") {
+      // Evita arrastrar datos viejos entre pestañas
+      setOrders([]);
+      setOrdersVersion((v) => v + 1);
       fetchOrders();
     }
-  }, [activeSection, businessType, fetchOrders]);
+  }, [activeSection, businessType, fetchOrders, setOrdersVersion]);
 
   useEffect(() => {
     if (activeSection === "attachments" && businessType === "RETAIL") {
@@ -12248,6 +12255,7 @@ return (
                       </div>
                     ) : (
                       <VirtualizedList
+                        key={`debts-${ordersVersion}-${debtOrders.length}`}
                         items={debtOrders}
                         itemHeight={210}
                         height={720}
@@ -12307,10 +12315,9 @@ return (
                                     type="button"
                                     className="btn btn-outline btn-sm"
                                     onClick={async () => {
-                                      if (!orders.find((o) => o.id === order.id)) {
-                                        await fetchOrders();
-                                      }
-                                      setOrderModalId(order.id);
+                                      await fetchOrders();
+                                      setActiveSection("orders");
+                                      setTimeout(() => setOrderModalId(order.id), 0);
                                     }}
                                   >
                                     Ver pedido
