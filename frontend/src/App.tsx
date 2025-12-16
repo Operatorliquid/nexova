@@ -12469,7 +12469,10 @@ return (
                                   <button
                                     type="button"
                                     className="btn btn-outline btn-sm"
-                                    onClick={() => setOrderModalId(order.id)}
+                                    onClick={() => {
+                                      setOrderModalTab("details");
+                                      setOrderModalId(order.id);
+                                    }}
                                   >
                                     Ver pedido
                                   </button>

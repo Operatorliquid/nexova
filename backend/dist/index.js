@@ -3043,7 +3043,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                             const proofFilename = `proof-${Date.now()}-${i}.${ext}`;
                             const proofPath = path_1.default.join(ORDER_UPLOADS_DIR, proofFilename);
                             await fsp.writeFile(proofPath, buffer);
-                            const fileUrl = `/uploads/orders/${proofFilename}`;
+                            const fileUrl = buildPublicUrl(`/uploads/orders/${proofFilename}`);
                             const duplicateExact = await prisma_1.prisma.paymentProof.findFirst({
                                 where: { doctorId: doctor.id, bytesSha256: hash },
                                 orderBy: { createdAt: "desc" },
