@@ -576,6 +576,7 @@ async function handleRetailAgentAction(params) {
             name: name.toLowerCase(),
             normalizedName: normalizedName.toLowerCase(),
             quantity: Number(it.quantity) || 0,
+            op: typeof it.op === "string" ? it.op : undefined,
         };
     })
         .filter((it) => (it.normalizedName || it.name) && it.quantity > 0);
@@ -596,6 +597,7 @@ async function handleRetailAgentAction(params) {
             productId: match.id,
             quantity: item.quantity,
             name: match.name,
+            op: item.op,
         });
     }
     // ✅ Si faltó mapear algún producto, NO guardamos todavía
@@ -652,6 +654,15 @@ async function handleRetailAgentAction(params) {
         /\b(sum(ar|ame|á)|agreg(ar|ame|á|alas)|añad(ir|ime|í)|mas|\+)\b/i.test(rawText);
     const target = (_j = pendingOrders[0]) !== null && _j !== void 0 ? _j : null;
     const targetOrderId = (_k = target === null || target === void 0 ? void 0 : target.id) !== null && _k !== void 0 ? _k : null;
+    const beforeItemsSnapshot = ((target === null || target === void 0 ? void 0 : target.items) || []).map((it) => {
+        var _a, _b;
+        const productName = ((_a = products.find((p) => p.id === it.productId)) === null || _a === void 0 ? void 0 : _a.name) || "Producto";
+        return {
+            productId: it.productId,
+            quantity: (_b = it.quantity) !== null && _b !== void 0 ? _b : 0,
+            name: productName,
+        };
+    });
     if (target && target.inventoryDeducted) {
         await restockOrderInventory(target);
     }
@@ -714,9 +725,30 @@ async function handleRetailAgentAction(params) {
     }
     const order = upsert.order;
     const summary = order.items
-        .map((it) => `- ${it.quantity} x ${it.product.name}`)
+        .map((it) => { var _a; return `- ${it.quantity} x ${((_a = it.product) === null || _a === void 0 ? void 0 : _a.name) || "Producto"}`; })
         .join("\n") || "Pedido vacío";
-    await sendMessage(`Revisá si está bien 👇\n\nPedido #${order.sequenceNumber} (estado: Falta revisión):\n${summary}\nTotal: $${order.totalAmount}\n\n` +
+    const isEditingExisting = !!targetOrderId;
+    const changesText = Array.isArray(action.items) && action.items.length
+        ? action.items
+            .map((it) => {
+            const name = ((it === null || it === void 0 ? void 0 : it.normalizedName) || (it === null || it === void 0 ? void 0 : it.name) || "producto").toString();
+            const qty = typeof (it === null || it === void 0 ? void 0 : it.quantity) === "number" && Number.isFinite(it.quantity)
+                ? Math.max(0, Math.trunc(it.quantity))
+                : 1;
+            const op = (it === null || it === void 0 ? void 0 : it.op) || "add";
+            if (op === "remove")
+                return `saqué ${name}`;
+            if (op === "set")
+                return `dejé ${qty} x ${name}`;
+            return `sumé ${qty} x ${name}`;
+        })
+            .join(", ")
+        : "sumé lo que me pediste";
+    const prefix = isEditingExisting
+        ? `Dale. Como ya tenés un pedido en revisión (#${order.sequenceNumber}), ${changesText} a ese mismo pedido.\n\n`
+        : "";
+    await sendMessage(`${prefix}Revisá si está bien 👇\n\n` +
+        `Pedido #${order.sequenceNumber} (estado: Falta revisión):\n${summary}\nTotal: $${order.totalAmount}\n\n` +
         `Si está OK respondé *CONFIRMAR* (o OK / dale / listo).\n` +
         `Para sumar: "sumar 1 coca". Para quitar: "quitar coca". Para cambiar: "cambiar coca a 3".`);
     return true;

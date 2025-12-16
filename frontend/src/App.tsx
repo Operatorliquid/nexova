@@ -2320,8 +2320,17 @@ const [automationMessages, setAutomationMessages] = useState<
   const [orderPaymentFilter, setOrderPaymentFilter] = useState<
     "all" | "unpaid" | "partial" | "paid"
   >("all");
-  const [orderPaymentCustom, setOrderPaymentCustom] = useState<number>(0);
-  const [orderPaymentDirty, setOrderPaymentDirty] = useState(false);
+  const [orderPaymentDrafts, setOrderPaymentDrafts] = useState<
+    Record<
+      number,
+      {
+        base: number;
+        entries: Array<{ id: string; amount: number; createdAt: string }>;
+        adding: boolean;
+        input: string;
+      }
+    >
+  >({});
   const [orderAttachmentUploadingId, setOrderAttachmentUploadingId] = useState<number | null>(null);
   const [orderAttachmentError, setOrderAttachmentError] = useState<string | null>(null);
   const [orderReminderSendingId, setOrderReminderSendingId] = useState<number | null>(null);
@@ -2329,7 +2338,6 @@ const [automationMessages, setAutomationMessages] = useState<
   const [orderReminderPendingAmount, setOrderReminderPendingAmount] = useState<number>(0);
   const [debtFilterInput, setDebtFilterInput] = useState<number>(2);
   const [debtFilterDays, setDebtFilterDays] = useState<number>(2);
-  const orderPaymentHydrateRef = useRef<{ orderId: number; version: string } | null>(null);
   const lastInboxRefreshRef = useRef<number>(0);
   const lastOrdersRefreshRef = useRef<number>(0);
   const openDeleteOrder = useCallback(
@@ -3090,8 +3098,6 @@ const automationAppointmentPool = useMemo(() => {
           setOrders((prev) =>
             prev.map((ord) => (ord.id === updated.id ? updated : ord))
           );
-          // Al recibir datos nuevos, habilitamos rehidratar estados locales
-          orderPaymentHydrateRef.current = null;
           const nowConfirmed =
             updated.status === "confirmed" || status === "confirmed";
           if (nowConfirmed && !wasConfirmed && !extra?.suppressPrint) {
@@ -3116,6 +3122,113 @@ const automationAppointmentPool = useMemo(() => {
       }
     },
     [token, businessType, fetchOrders, printOrderReceipt]
+  );
+
+  const getPaymentDraft = useCallback(
+    (order: CommerceOrder) =>
+      orderPaymentDrafts[order.id] ?? {
+        base: order.paidAmount ?? 0,
+        entries: [],
+        adding: false,
+        input: "",
+      },
+    [orderPaymentDrafts]
+  );
+
+  const toggleAddPaymentMode = useCallback((order: CommerceOrder) => {
+    setOrderPaymentDrafts((prev) => {
+      const current = prev[order.id] ?? {
+        base: order.paidAmount ?? 0,
+        entries: [],
+        adding: false,
+        input: "",
+      };
+      return {
+        ...prev,
+        [order.id]: { ...current, adding: !current.adding },
+      };
+    });
+  }, []);
+
+  const handleMarkOrderUnpaid = useCallback(
+    async (order: CommerceOrder) => {
+      if (!token || businessType !== "RETAIL") return;
+      await handleUpdateOrderStatus(order.id, order.status, order, {
+        paymentStatus: "unpaid",
+        paidAmount: 0,
+        suppressPrint: true,
+      });
+      setOrderPaymentDrafts((prev) => ({
+        ...prev,
+        [order.id]: { base: 0, entries: [], adding: false, input: "" },
+      }));
+    },
+    [businessType, handleUpdateOrderStatus, token]
+  );
+
+  const handleAddPaymentEntry = useCallback(
+    async (order: CommerceOrder) => {
+      if (!token || businessType !== "RETAIL") return;
+      const draft = getPaymentDraft(order);
+      const amount = Math.max(0, Number(draft.input) || 0);
+      if (!amount) return;
+      const newPaid = Math.max(0, draft.base + amount);
+      const status =
+        newPaid === 0 ? "unpaid" : newPaid >= order.totalAmount ? "paid" : "partial";
+
+      await handleUpdateOrderStatus(order.id, order.status, order, {
+        paymentStatus: status as any,
+        paidAmount: newPaid,
+        suppressPrint: true,
+      });
+
+      setOrderPaymentDrafts((prev) => {
+        const current = prev[order.id] ?? draft;
+        return {
+          ...prev,
+          [order.id]: {
+            ...current,
+            base: newPaid,
+            adding: true,
+            input: "",
+            entries: [
+              ...(current.entries || []),
+              { id: `pay-${Date.now()}-${Math.random()}`, amount, createdAt: new Date().toISOString() },
+            ],
+          },
+        };
+      });
+    },
+    [businessType, getPaymentDraft, handleUpdateOrderStatus, token]
+  );
+
+  const handleRemovePaymentEntry = useCallback(
+    async (order: CommerceOrder, entryId: string, amount: number) => {
+      if (!token || businessType !== "RETAIL") return;
+      const draft = getPaymentDraft(order);
+      const newPaid = Math.max(0, draft.base - amount);
+      const status =
+        newPaid === 0 ? "unpaid" : newPaid >= order.totalAmount ? "paid" : "partial";
+
+      await handleUpdateOrderStatus(order.id, order.status, order, {
+        paymentStatus: status as any,
+        paidAmount: newPaid,
+        suppressPrint: true,
+      });
+
+      setOrderPaymentDrafts((prev) => {
+        const current = prev[order.id] ?? draft;
+        return {
+          ...prev,
+          [order.id]: {
+            ...current,
+            base: newPaid,
+            entries: (current.entries || []).filter((e) => e.id !== entryId),
+          },
+        };
+      });
+    },
+    [businessType, getPaymentDraft, handleUpdateOrderStatus, token]
   );
 
   const handleUploadOrderAttachment = useCallback(
@@ -3378,19 +3491,26 @@ const automationAppointmentPool = useMemo(() => {
 
   useEffect(() => {
     if (orderModalId === null) return;
-    if (orderUpdatingId === orderModalId) return; // evitar pisar mientras se está guardando
     const ord = orders.find((o) => o.id === orderModalId);
     if (!ord) return;
-    const version = `${ord.paymentStatus}|${ord.paidAmount ?? 0}`;
-    const prev = orderPaymentHydrateRef.current;
-    if (orderPaymentDirty && prev && prev.orderId === ord.id && prev.version === version) {
-      return;
-    }
-    orderPaymentHydrateRef.current = { orderId: ord.id, version };
-    const paidAmount = ord.paidAmount ?? 0;
-    setOrderPaymentCustom(paidAmount || 0);
-    setOrderPaymentDirty(false);
-  }, [orderModalId, orders, orderUpdatingId]);
+    const basePaid = ord.paidAmount ?? 0;
+    setOrderPaymentDrafts((prev) => {
+      const current = prev[ord.id];
+      if (!current) {
+        return {
+          ...prev,
+          [ord.id]: { base: basePaid, entries: [], adding: false, input: "" },
+        };
+      }
+      if (current.base !== basePaid) {
+        return {
+          ...prev,
+          [ord.id]: { ...current, base: basePaid },
+        };
+      }
+      return prev;
+    });
+  }, [orderModalId, orders]);
 
   useEffect(() => {
     if (orderModalId !== null) {
@@ -11565,127 +11685,210 @@ return (
                               </div>
                             </div>
                           ) : orderModalTab === "payments" ? (
-                            <div className="space-y-3">
-                              <div className="flex items-center justify-between gap-3">
-                                <div>
-                                  <p className="text-sm font-semibold text-slate-900">Pagos</p>
-                                  <p className="text-xs text-slate-500">
-                                    Pagado: ${ord.paidAmount.toLocaleString("es-AR")} / $
-                                    {ord.totalAmount.toLocaleString("es-AR")}
-                                  </p>
-                                </div>
-                                <div className="flex items-center gap-2 text-xs">
-                                  <span
-                                    className={`px-3 py-1 rounded-full border ${
-                                      ord.paymentStatus === "paid"
-                                        ? "border-emerald-500 text-emerald-700 bg-emerald-50"
-                                        : ord.paymentStatus === "partial"
-                                        ? "border-amber-400 text-amber-700 bg-amber-50"
-                                        : "border-slate-400 text-slate-700 bg-slate-100"
-                                    }`}
-                                  >
-                                    {ord.paymentStatus === "paid"
-                                      ? "Pagado"
-                                      : ord.paymentStatus === "partial"
-                                      ? "Pago parcial"
-                                      : "No pagado"}
-                                  </span>
-                                  <span className="text-[11px] text-slate-500">
-                                    Falta: $
-                                    {Math.max(0, ord.totalAmount - (ord.paidAmount || 0)).toLocaleString(
-                                      "es-AR"
+                            (() => {
+                              const paymentDraft = getPaymentDraft(ord);
+                              const currentPaid = Math.max(0, paymentDraft.base || 0);
+                              const outstanding = Math.max(
+                                0,
+                                (ord.totalAmount || 0) - currentPaid
+                              );
+                              const paymentEntries = paymentDraft.entries || [];
+                              const payStatusLabel =
+                                ord.paymentStatus === "paid"
+                                  ? "Pagado"
+                                  : ord.paymentStatus === "partial"
+                                  ? "Pago parcial"
+                                  : "No pagado";
+                              const payStatusClass =
+                                ord.paymentStatus === "paid"
+                                  ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                  : ord.paymentStatus === "partial"
+                                  ? "bg-amber-50 text-amber-700 border-amber-200"
+                                  : "bg-slate-100 text-slate-700 border-slate-200";
+
+                              return (
+                                <div className="space-y-4">
+                                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2">
+                                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                                      <div>
+                                        <p className="text-sm font-semibold text-slate-900">
+                                          Pagos del pedido
+                                        </p>
+                                        <p className="text-xs text-slate-500">
+                                          Pagado ${currentPaid.toLocaleString("es-AR")} / $
+                                          {ord.totalAmount.toLocaleString("es-AR")} · Falta $
+                                          {outstanding.toLocaleString("es-AR")}
+                                        </p>
+                                      </div>
+                                      <div className="flex flex-wrap gap-2">
+                                        <button
+                                          type="button"
+                                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${
+                                            ord.paymentStatus === "unpaid"
+                                              ? "bg-rose-50 text-rose-700 border-rose-200"
+                                              : "bg-white text-slate-700 border-slate-200 hover:border-slate-300"
+                                          } ${paymentDraft.adding ? "opacity-60 cursor-not-allowed" : ""}`}
+                                          onClick={() => handleMarkOrderUnpaid(ord)}
+                                          disabled={paymentDraft.adding || orderUpdatingId === ord.id}
+                                        >
+                                          Pedido no pagado
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+                                            paymentDraft.adding
+                                              ? "bg-emerald-600 text-white shadow-sm"
+                                              : "bg-emerald-100 text-emerald-800 hover:bg-emerald-200"
+                                          }`}
+                                          onClick={() => toggleAddPaymentMode(ord)}
+                                          disabled={orderUpdatingId === ord.id}
+                                        >
+                                          Agregar pago
+                                        </button>
+                                      </div>
+                                    </div>
+
+                                    {paymentDraft.adding && (
+                                      <div className="mt-3 space-y-2 rounded-lg border border-emerald-200 bg-white px-3 py-3">
+                                        <p className="text-xs text-slate-600">Nuevo pago</p>
+                                        <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+                                          <input
+                                            type="number"
+                                            min={0}
+                                            className="w-full sm:w-40 rounded-lg border border-slate-200 px-3 py-2 text-right text-sm focus:outline-none focus:ring-2 focus:ring-emerald-300"
+                                            value={paymentDraft.input}
+                                            onChange={(e) => {
+                                              const val = e.target.value;
+                                              setOrderPaymentDrafts((prev) => {
+                                                const current =
+                                                  prev[ord.id] ?? {
+                                                    base: ord.paidAmount ?? 0,
+                                                    entries: [],
+                                                    adding: true,
+                                                    input: "",
+                                                  };
+                                                return {
+                                                  ...prev,
+                                                  [ord.id]: { ...current, input: val },
+                                                };
+                                              });
+                                            }}
+                                            placeholder="Monto a ingresar"
+                                          />
+                                          <button
+                                            type="button"
+                                            className="btn btn-primary btn-sm disabled:opacity-60"
+                                            onClick={() => handleAddPaymentEntry(ord)}
+                                            disabled={orderUpdatingId === ord.id}
+                                          >
+                                            Añadir
+                                          </button>
+                                        </div>
+                                        <p className="text-[11px] text-slate-500">
+                                          Se suma al total pagado y podés agregar varios.
+                                        </p>
+                                      </div>
                                     )}
-                                  </span>
-                                </div>
-                              </div>
-
-                              <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
-                                <p className="text-xs text-slate-600">
-                                  Agregá un pago parcial o total. Podés registrar varios pagos (se suman).
-                                </p>
-                                <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-                                  <input
-                                    type="number"
-                                    min={0}
-                                    className="w-full sm:w-36 rounded border border-slate-300 px-3 py-2 text-right text-sm"
-                                    value={orderPaymentCustom}
-                                    onChange={(e) => {
-                                      const val = Math.max(0, Number(e.target.value) || 0);
-                                      setOrderPaymentCustom(val);
-                                      setOrderPaymentDirty(true);
-                                    }}
-                                    placeholder="Monto a agregar"
-                                  />
-                                  <div className="flex items-center gap-2">
-                                    <button
-                                      type="button"
-                                      className="btn btn-primary btn-sm disabled:opacity-60"
-                                      onClick={() => {
-                                        const add = Math.max(0, orderPaymentCustom || 0);
-                                        const newPaid = Math.max(0, (ord.paidAmount || 0) + add);
-                                        const status =
-                                          newPaid === 0
-                                            ? "unpaid"
-                                            : newPaid >= ord.totalAmount
-                                            ? "paid"
-                                            : "partial";
-                                        handleUpdateOrderStatus(ord.id, ord.status, ord, {
-                                          paymentStatus: status,
-                                          paidAmount: newPaid,
-                                          suppressPrint: true,
-                                        });
-                                      }}
-                                      disabled={orderUpdatingId === orderModalId}
-                                    >
-                                      Agregar pago
-                                    </button>
-                                    <button
-                                      type="button"
-                                      className="btn btn-ghost btn-sm"
-                                      onClick={() => {
-                                        handleUpdateOrderStatus(ord.id, ord.status, ord, {
-                                          paymentStatus: "unpaid",
-                                          paidAmount: 0,
-                                          suppressPrint: true,
-                                        });
-                                        setOrderPaymentCustom(0);
-                                      }}
-                                      disabled={orderUpdatingId === orderModalId}
-                                    >
-                                      Marcar no pagado
-                                    </button>
                                   </div>
-                                </div>
-                                <p className="text-[11px] text-slate-500">
-                                  Se suma al total pagado. Pagado actual: $
-                                  {ord.paidAmount.toLocaleString("es-AR")}
-                                </p>
-                              </div>
 
-                              {(ord.paymentStatus === "unpaid" || ord.paymentStatus === "partial") && (
-                                <div className="pt-2">
-                                  <button
-                                    type="button"
-                                    className="btn btn-outline btn-sm"
-                                    onClick={() => {
-                                      const pendingAmount = Math.max(
-                                        0,
-                                        (ord.totalAmount || 0) - (ord.paidAmount || 0)
-                                      );
-                                      setOrderReminderConfirmId(ord.id);
-                                      setOrderReminderPendingAmount(pendingAmount);
-                                    }}
-                                    disabled={
-                                      orderReminderSendingId === ord.id || orderUpdatingId === ord.id
-                                    }
-                                  >
-                                    {orderReminderSendingId === ord.id
-                                      ? "Enviando..."
-                                      : "Enviar recordatorio"}
-                                  </button>
+                                  <div className="rounded-xl border border-slate-200 bg-white p-3 space-y-3">
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                      <div className="flex flex-col">
+                                        <p className="text-sm font-semibold text-slate-900">
+                                          Pagos registrados
+                                        </p>
+                                        <p className="text-xs text-slate-500">
+                                          Total pagado $
+                                          {currentPaid.toLocaleString("es-AR")} · Falta $
+                                          {outstanding.toLocaleString("es-AR")}
+                                        </p>
+                                      </div>
+                                      <span
+                                        className={`px-3 py-1 rounded-full border text-xs font-semibold ${payStatusClass}`}
+                                      >
+                                        {payStatusLabel}
+                                      </span>
+                                    </div>
+
+                                    {paymentEntries.length === 0 && currentPaid === 0 ? (
+                                      <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-4 text-sm text-slate-500">
+                                        No hay pagos registrados todavía.
+                                      </div>
+                                    ) : (
+                                      <div className="space-y-2">
+                                        {paymentEntries.map((entry) => {
+                                          const createdLabel = (() => {
+                                            try {
+                                              return new Date(entry.createdAt).toLocaleString("es-AR", {
+                                                hour: "2-digit",
+                                                minute: "2-digit",
+                                                day: "2-digit",
+                                                month: "2-digit",
+                                              });
+                                            } catch {
+                                              return "";
+                                            }
+                                          })();
+                                          return (
+                                            <div
+                                              key={entry.id}
+                                              className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-800"
+                                            >
+                                              <div className="space-y-0.5">
+                                                <p className="font-semibold text-slate-900">
+                                                  +${entry.amount.toLocaleString("es-AR")}
+                                                </p>
+                                                <p className="text-[11px] text-slate-500">
+                                                  {createdLabel || "Agregado ahora"}
+                                                </p>
+                                              </div>
+                                              <button
+                                                type="button"
+                                                className="text-xs text-rose-600 hover:text-rose-500 disabled:opacity-50"
+                                                onClick={() =>
+                                                  handleRemovePaymentEntry(ord, entry.id, entry.amount)
+                                                }
+                                                disabled={orderUpdatingId === ord.id}
+                                              >
+                                                Eliminar
+                                              </button>
+                                            </div>
+                                          );
+                                        })}
+
+                                        <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm">
+                                          <span className="text-slate-700">Total registrado</span>
+                                          <span className="font-semibold text-slate-900">
+                                            ${currentPaid.toLocaleString("es-AR")}
+                                          </span>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  {(ord.paymentStatus === "unpaid" || ord.paymentStatus === "partial") && (
+                                    <div className="pt-1">
+                                      <button
+                                        type="button"
+                                        className="btn btn-outline btn-sm"
+                                        onClick={() => {
+                                          const pendingAmount = Math.max(0, outstanding);
+                                          setOrderReminderConfirmId(ord.id);
+                                          setOrderReminderPendingAmount(pendingAmount);
+                                        }}
+                                        disabled={
+                                          orderReminderSendingId === ord.id || orderUpdatingId === ord.id
+                                        }
+                                      >
+                                        {orderReminderSendingId === ord.id
+                                          ? "Enviando..."
+                                          : "Enviar recordatorio"}
+                                      </button>
+                                    </div>
+                                  )}
                                 </div>
-                              )}
-                            </div>
+                              );
+                            })()
                           ) : (
                             <div className="space-y-3">
                               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
