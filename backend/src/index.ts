@@ -3754,6 +3754,12 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
 
     // 1) Rama retail: no creamos pacientes, trabajamos con RetailClient
     if (doctor.businessType === "RETAIL") {
+      const retailClient = await ensureRetailClientForPhone({
+        doctorId: doctor.id,
+        phone: phoneE164,
+        name: profileName || null,
+      });
+
       const productCatalog =
         (
           await prisma.product.findMany({
@@ -3782,11 +3788,25 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
           validUntil: p.endDate ? p.endDate.toISOString().slice(0, 10) : undefined,
         })) || [];
 
-      const retailClient = await ensureRetailClientForPhone({
-        doctorId: doctor.id,
-        phone: phoneE164,
-        name: profileName || null,
+      const EDITABLE_ORDER_STATUSES = ["PENDING", "PENDING_REVIEW", "FALTA_REVISION", "IN_REVIEW", "pending"];
+
+      const pendingOrdersForCtx = await prisma.order.findMany({
+        where: { doctorId: doctor.id, clientId: retailClient.id, status: { in: EDITABLE_ORDER_STATUSES as any } },
+        include: { items: { include: { product: true } } },
+        orderBy: { createdAt: "desc" },
+        take: 3,
       });
+
+      const pendingOrdersCtx = pendingOrdersForCtx.map((o) => ({
+        sequenceNumber: o.sequenceNumber,
+        status: o.status,
+        items: o.items.map((it) => ({ name: it.product?.name || "Producto", quantity: it.quantity })),
+      }));
+
+      console.log(
+        "[RETAIL] pendingOrders:",
+        pendingOrdersCtx.map((o) => ({ n: o.sequenceNumber, s: o.status, items: o.items.length }))
+      );
 
       const savedIncoming = await prisma.message.create({
         data: {
@@ -3897,12 +3917,6 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
         }))
         .filter((m) => m.text.trim().length > 0);
 
-      const pendingOrdersForAgent = await prisma.order.findMany({
-        where: { doctorId: doctor.id, clientId: retailClient.id, status: "pending" },
-        include: { items: { include: { product: true } } },
-        orderBy: { createdAt: "desc" },
-      });
-
       const agentCtx = {
         text: bodyText,
         patientName: retailClient.fullName,
@@ -3949,6 +3963,7 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
         },
         productCatalog,
         activePromotions,
+        pendingOrders: pendingOrdersCtx,
         storeProfile: {
           name: doctor.name,
           address: (doctor as any).clinicAddress || null,
@@ -3966,6 +3981,7 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
         catalog: Array.isArray(agentCtx.productCatalog) ? agentCtx.productCatalog.length : 0,
         promos: Array.isArray(agentCtx.activePromotions) ? agentCtx.activePromotions.length : 0,
         media: agentCtx.incomingMedia?.count ?? 0,
+        pending: agentCtx.pendingOrders?.map((o) => ({ n: o.sequenceNumber, s: o.status, items: o.items.length })),
       });
 
       const agentResult = await runWhatsappAgent(agentCtx);

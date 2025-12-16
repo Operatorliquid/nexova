@@ -2889,7 +2889,7 @@ app.get("/api/whatsapp/webhook", (_req, res) => {
     res.sendStatus(200);
 });
 app.post("/api/whatsapp/webhook", async (req, res) => {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x;
     try {
         if (!validateTwilioSignature(req)) {
             return res.status(403).send("Invalid signature");
@@ -2960,6 +2960,11 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
         });
         // 1) Rama retail: no creamos pacientes, trabajamos con RetailClient
         if (doctor.businessType === "RETAIL") {
+            const retailClient = await (0, retail_2.ensureRetailClientForPhone)({
+                doctorId: doctor.id,
+                phone: phoneE164,
+                name: profileName || null,
+            });
             const productCatalog = (await prisma_1.prisma.product.findMany({
                 where: { doctorId: doctor.id },
                 orderBy: { name: "asc" },
@@ -2980,11 +2985,19 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                 description: p.description || undefined,
                 validUntil: p.endDate ? p.endDate.toISOString().slice(0, 10) : undefined,
             })) || [];
-            const retailClient = await (0, retail_2.ensureRetailClientForPhone)({
-                doctorId: doctor.id,
-                phone: phoneE164,
-                name: profileName || null,
+            const EDITABLE_ORDER_STATUSES = ["PENDING", "PENDING_REVIEW", "FALTA_REVISION", "IN_REVIEW", "pending"];
+            const pendingOrdersForCtx = await prisma_1.prisma.order.findMany({
+                where: { doctorId: doctor.id, clientId: retailClient.id, status: { in: EDITABLE_ORDER_STATUSES } },
+                include: { items: { include: { product: true } } },
+                orderBy: { createdAt: "desc" },
+                take: 3,
             });
+            const pendingOrdersCtx = pendingOrdersForCtx.map((o) => ({
+                sequenceNumber: o.sequenceNumber,
+                status: o.status,
+                items: o.items.map((it) => { var _a; return ({ name: ((_a = it.product) === null || _a === void 0 ? void 0 : _a.name) || "Producto", quantity: it.quantity }); }),
+            }));
+            console.log("[RETAIL] pendingOrders:", pendingOrdersCtx.map((o) => ({ n: o.sequenceNumber, s: o.status, items: o.items.length })));
             const savedIncoming = await prisma_1.prisma.message.create({
                 data: {
                     waMessageId: payload.MessageSid,
@@ -3086,11 +3099,6 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                 });
             })
                 .filter((m) => m.text.trim().length > 0);
-            const pendingOrdersForAgent = await prisma_1.prisma.order.findMany({
-                where: { doctorId: doctor.id, clientId: retailClient.id, status: "pending" },
-                include: { items: { include: { product: true } } },
-                orderBy: { createdAt: "desc" },
-            });
             const agentCtx = {
                 text: bodyText,
                 patientName: retailClient.fullName,
@@ -3137,6 +3145,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                 },
                 productCatalog,
                 activePromotions,
+                pendingOrders: pendingOrdersCtx,
                 storeProfile: {
                     name: doctor.name,
                     address: doctor.clinicAddress || null,
@@ -3153,6 +3162,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                 catalog: Array.isArray(agentCtx.productCatalog) ? agentCtx.productCatalog.length : 0,
                 promos: Array.isArray(agentCtx.activePromotions) ? agentCtx.activePromotions.length : 0,
                 media: (_d = (_c = agentCtx.incomingMedia) === null || _c === void 0 ? void 0 : _c.count) !== null && _d !== void 0 ? _d : 0,
+                pending: (_e = agentCtx.pendingOrders) === null || _e === void 0 ? void 0 : _e.map((o) => ({ n: o.sequenceNumber, s: o.status, items: o.items.length })),
             });
             const agentResult = await (0, ai_1.runWhatsappAgent)(agentCtx);
             if (!agentResult)
@@ -3160,14 +3170,14 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
             if (agentResult.profileUpdates) {
                 const info = agentResult.profileUpdates;
                 const update = {};
-                if ((_e = info.name) === null || _e === void 0 ? void 0 : _e.trim())
+                if ((_f = info.name) === null || _f === void 0 ? void 0 : _f.trim())
                     update.fullName = info.name.trim().slice(0, 120);
                 if (info.dni) {
                     const normalized = normalizeDniInput(info.dni);
                     if (normalized)
                         update.dni = normalized;
                 }
-                if ((_f = info.address) === null || _f === void 0 ? void 0 : _f.trim()) {
+                if ((_g = info.address) === null || _g === void 0 ? void 0 : _g.trim()) {
                     const addr = info.address.trim();
                     if (addr.length >= 5)
                         update.businessAddress = addr.slice(0, 160);
@@ -3199,7 +3209,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                     const waResult = await (0, whatsapp_1.sendWhatsAppText)(phoneE164, messageWithHint, doctorWhatsappConfig);
                     await prisma_1.prisma.message.create({
                         data: {
-                            waMessageId: (_g = waResult === null || waResult === void 0 ? void 0 : waResult.sid) !== null && _g !== void 0 ? _g : null,
+                            waMessageId: (_h = waResult === null || waResult === void 0 ? void 0 : waResult.sid) !== null && _h !== void 0 ? _h : null,
                             from: doctorNumber,
                             to: phoneE164,
                             direction: "outgoing",
@@ -3258,7 +3268,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                 const waResult = await (0, whatsapp_1.sendWhatsAppText)(phoneE164, responseText, doctorWhatsappConfig);
                 await prisma_1.prisma.message.create({
                     data: {
-                        waMessageId: (_h = waResult === null || waResult === void 0 ? void 0 : waResult.sid) !== null && _h !== void 0 ? _h : null,
+                        waMessageId: (_j = waResult === null || waResult === void 0 ? void 0 : waResult.sid) !== null && _j !== void 0 ? _j : null,
                         from: doctorNumber,
                         to: phoneE164,
                         direction: "outgoing",
@@ -3297,7 +3307,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                 const waResult = await (0, whatsapp_1.sendWhatsAppText)(phoneE164, responseText, doctorWhatsappConfig);
                 await prisma_1.prisma.message.create({
                     data: {
-                        waMessageId: (_j = waResult === null || waResult === void 0 ? void 0 : waResult.sid) !== null && _j !== void 0 ? _j : null,
+                        waMessageId: (_k = waResult === null || waResult === void 0 ? void 0 : waResult.sid) !== null && _k !== void 0 ? _k : null,
                         from: doctorNumber,
                         to: phoneE164,
                         direction: "outgoing",
@@ -3390,7 +3400,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                     birthDate: patient.birthDate ? patient.birthDate.toISOString() : null,
                     address: patient.address,
                     conversationState: patient.conversationState,
-                    conversationStateData: (_k = patient.conversationStateData) !== null && _k !== void 0 ? _k : undefined,
+                    conversationStateData: (_l = patient.conversationStateData) !== null && _l !== void 0 ? _l : undefined,
                     needsDni: patient.needsDni,
                     needsName: patient.needsName,
                     needsBirthDate: patient.needsBirthDate,
@@ -3495,7 +3505,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                     timezone: DEFAULT_TIMEZONE,
                     fallbackReply: outgoingMessage,
                 });
-                patient = (_l = bookingOutcome.patient) !== null && _l !== void 0 ? _l : patient;
+                patient = (_m = bookingOutcome.patient) !== null && _m !== void 0 ? _m : patient;
                 outgoingMessage = bookingOutcome.message;
             }
             else if (flowResult.cancelRequest) {
@@ -3505,7 +3515,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                     cancelRequest: flowResult.cancelRequest,
                     fallbackReply: outgoingMessage,
                 });
-                patient = (_m = cancelOutcome.patient) !== null && _m !== void 0 ? _m : patient;
+                patient = (_o = cancelOutcome.patient) !== null && _o !== void 0 ? _o : patient;
                 outgoingMessage = cancelOutcome.message;
             }
             if (outgoingMessage) {
@@ -3526,21 +3536,21 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
             const n = Number(cleaned);
             return Number.isFinite(n) ? n : null;
         };
-        const consultationPrice = parsePrice((_o = doctor.consultFee) !== null && _o !== void 0 ? _o : null);
-        const emergencyConsultationPrice = parsePrice((_p = doctor.emergencyFee) !== null && _p !== void 0 ? _p : null);
+        const consultationPrice = parsePrice((_p = doctor.consultFee) !== null && _p !== void 0 ? _p : null);
+        const emergencyConsultationPrice = parsePrice((_q = doctor.emergencyFee) !== null && _q !== void 0 ? _q : null);
         const patientProfilePayload = {
-            consultReason: (_q = patient.consultReason) !== null && _q !== void 0 ? _q : null,
+            consultReason: (_r = patient.consultReason) !== null && _r !== void 0 ? _r : null,
             pendingSlotISO: patient.pendingSlotISO
                 ? patient.pendingSlotISO.toISOString()
                 : null,
-            pendingSlotHumanLabel: (_r = patient.pendingSlotHumanLabel) !== null && _r !== void 0 ? _r : null,
+            pendingSlotHumanLabel: (_s = patient.pendingSlotHumanLabel) !== null && _s !== void 0 ? _s : null,
             pendingSlotExpiresAt: patient.pendingSlotExpiresAt
                 ? patient.pendingSlotExpiresAt.toISOString()
                 : null,
-            pendingSlotReason: (_s = patient.pendingSlotReason) !== null && _s !== void 0 ? _s : null,
-            dni: (_t = patient.dni) !== null && _t !== void 0 ? _t : null,
+            pendingSlotReason: (_t = patient.pendingSlotReason) !== null && _t !== void 0 ? _t : null,
+            dni: (_u = patient.dni) !== null && _u !== void 0 ? _u : null,
             birthDate: patient.birthDate ? patient.birthDate.toISOString() : null,
-            address: (_u = patient.address) !== null && _u !== void 0 ? _u : null,
+            address: (_v = patient.address) !== null && _v !== void 0 ? _v : null,
             needsDni: patient.needsDni,
             needsName: patient.needsName,
             needsBirthDate: patient.needsBirthDate,
@@ -3619,7 +3629,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                         });
                     }
                     catch (error) {
-                        if ((error === null || error === void 0 ? void 0 : error.code) === "P2002" && ((_v = error === null || error === void 0 ? void 0 : error.meta) === null || _v === void 0 ? void 0 : _v.modelName) === "Patient") {
+                        if ((error === null || error === void 0 ? void 0 : error.code) === "P2002" && ((_w = error === null || error === void 0 ? void 0 : error.meta) === null || _w === void 0 ? void 0 : _w.modelName) === "Patient") {
                             console.warn("[RetailAgent] DNI en uso, omitiendo actualización del paciente");
                         }
                         else {
@@ -3667,7 +3677,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                     const waResult = await (0, whatsapp_1.sendWhatsAppText)(phoneE164, messageWithHint, doctorWhatsappConfig);
                     await prisma_1.prisma.message.create({
                         data: {
-                            waMessageId: (_w = waResult === null || waResult === void 0 ? void 0 : waResult.sid) !== null && _w !== void 0 ? _w : null,
+                            waMessageId: (_x = waResult === null || waResult === void 0 ? void 0 : waResult.sid) !== null && _x !== void 0 ? _x : null,
                             from: doctorNumber,
                             to: phoneE164,
                             direction: "outgoing",

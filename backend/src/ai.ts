@@ -166,6 +166,11 @@ export type WhatsappAgentContext = {
     contentTypes?: string[];
   };
   retailConversationState?: any;
+  pendingOrders?: Array<{
+    sequenceNumber: number;
+    status: string;
+    items: Array<{ name: string; quantity: number }>;
+  }>;
 };
 
 
