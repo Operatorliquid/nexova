@@ -550,6 +550,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
           name: p.name,
           price: p.price,
           description: p.description || undefined,
+          imageUrl: p.imageUrl || undefined,
         })),
         logoUrl: logoUrl || null,
         generatedAt: new Date(),
@@ -563,11 +564,42 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
       const reply =
         "Te paso el catálogo en PDF con precios y detalles. Contame qué querés pedir 👌";
       const messageWithHint = appendMenuHintForBusiness(reply, doctor.businessType as any);
+
+      const isHttpsPublic = /^https:\/\//i.test(catalog.publicUrl) && !/localhost|127\.0\.0\.1/i.test(catalog.publicUrl);
+
+      if (isHttpsPublic) {
+        try {
+          const waResult = await sendWhatsAppText(
+            phoneE164,
+            messageWithHint,
+            doctorWhatsappConfig,
+            catalog.publicUrl
+          );
+          await prisma.message.create({
+            data: {
+              waMessageId: (waResult as any)?.sid ?? null,
+              from: doctorNumber,
+              to: phoneE164,
+              direction: "outgoing",
+              type: "other",
+              body: reply,
+              rawPayload: waResult,
+              retailClientId: client.id,
+              doctorId: doctor.id,
+            },
+          });
+          return true;
+        } catch (err) {
+          console.warn("[RetailAgent] No se pudo enviar media WhatsApp, hago fallback a link:", err);
+        }
+      }
+
+      // Fallback: mandamos el link en texto (evita errores de MediaUrl en local/http)
+      const replyWithLink = `${reply}\n${catalog.publicUrl}`;
       const waResult = await sendWhatsAppText(
         phoneE164,
-        messageWithHint,
-        doctorWhatsappConfig,
-        catalog.publicUrl
+        replyWithLink,
+        doctorWhatsappConfig
       );
       await prisma.message.create({
         data: {
@@ -575,8 +607,8 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
           from: doctorNumber,
           to: phoneE164,
           direction: "outgoing",
-          type: "other",
-          body: reply,
+          type: "text",
+          body: replyWithLink,
           rawPayload: waResult,
           retailClientId: client.id,
           doctorId: doctor.id,

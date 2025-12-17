@@ -346,7 +346,7 @@ async function getAwaitingProofOrderNumber(params) {
     return true;
 }
 async function handleRetailAgentAction(params) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _0;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _0, _1;
     const { doctor, patient, retailClient, action, replyToPatient, phoneE164, doctorNumber, doctorWhatsappConfig, rawText, } = params;
     let client = retailClient;
     const products = await prisma_1.prisma.product.findMany({
@@ -469,6 +469,7 @@ async function handleRetailAgentAction(params) {
                     name: p.name,
                     price: p.price,
                     description: p.description || undefined,
+                    imageUrl: p.imageUrl || undefined,
                 })),
                 logoUrl: logoUrl || null,
                 generatedAt: new Date(),
@@ -479,15 +480,40 @@ async function handleRetailAgentAction(params) {
             }
             const reply = "Te paso el catálogo en PDF con precios y detalles. Contame qué querés pedir 👌";
             const messageWithHint = (0, hints_1.appendMenuHintForBusiness)(reply, doctor.businessType);
-            const waResult = await (0, whatsapp_1.sendWhatsAppText)(phoneE164, messageWithHint, doctorWhatsappConfig, catalog.publicUrl);
+            const isHttpsPublic = /^https:\/\//i.test(catalog.publicUrl) && !/localhost|127\.0\.0\.1/i.test(catalog.publicUrl);
+            if (isHttpsPublic) {
+                try {
+                    const waResult = await (0, whatsapp_1.sendWhatsAppText)(phoneE164, messageWithHint, doctorWhatsappConfig, catalog.publicUrl);
+                    await prisma_1.prisma.message.create({
+                        data: {
+                            waMessageId: (_d = waResult === null || waResult === void 0 ? void 0 : waResult.sid) !== null && _d !== void 0 ? _d : null,
+                            from: doctorNumber,
+                            to: phoneE164,
+                            direction: "outgoing",
+                            type: "other",
+                            body: reply,
+                            rawPayload: waResult,
+                            retailClientId: client.id,
+                            doctorId: doctor.id,
+                        },
+                    });
+                    return true;
+                }
+                catch (err) {
+                    console.warn("[RetailAgent] No se pudo enviar media WhatsApp, hago fallback a link:", err);
+                }
+            }
+            // Fallback: mandamos el link en texto (evita errores de MediaUrl en local/http)
+            const replyWithLink = `${reply}\n${catalog.publicUrl}`;
+            const waResult = await (0, whatsapp_1.sendWhatsAppText)(phoneE164, replyWithLink, doctorWhatsappConfig);
             await prisma_1.prisma.message.create({
                 data: {
-                    waMessageId: (_d = waResult === null || waResult === void 0 ? void 0 : waResult.sid) !== null && _d !== void 0 ? _d : null,
+                    waMessageId: (_e = waResult === null || waResult === void 0 ? void 0 : waResult.sid) !== null && _e !== void 0 ? _e : null,
                     from: doctorNumber,
                     to: phoneE164,
                     direction: "outgoing",
-                    type: "other",
-                    body: reply,
+                    type: "text",
+                    body: replyWithLink,
                     rawPayload: waResult,
                     retailClientId: client.id,
                     doctorId: doctor.id,
@@ -560,13 +586,13 @@ async function handleRetailAgentAction(params) {
                     include: { items: { include: { product: true } } },
                     orderBy: { createdAt: "desc" },
                 });
-                if ((_e = pending === null || pending === void 0 ? void 0 : pending.items) === null || _e === void 0 ? void 0 : _e.length) {
+                if ((_f = pending === null || pending === void 0 ? void 0 : pending.items) === null || _f === void 0 ? void 0 : _f.length) {
                     // qty: si el cliente mandó un número acá, lo usamos; si no, usamos el guardado
                     let qty2 = null;
                     const digit = follow.match(/\b(\d+)\b/);
                     if (digit === null || digit === void 0 ? void 0 : digit[1])
                         qty2 = parseInt(digit[1], 10);
-                    const qtyToRemove = (_f = qty2 !== null && qty2 !== void 0 ? qty2 : awaitingRemove.qty) !== null && _f !== void 0 ? _f : 1;
+                    const qtyToRemove = (_g = qty2 !== null && qty2 !== void 0 ? qty2 : awaitingRemove.qty) !== null && _g !== void 0 ? _g : 1;
                     // candidate = texto sin números/stopwords
                     let candidate2 = follow
                         .replace(/\b\d+\b/g, " ")
@@ -609,8 +635,8 @@ async function handleRetailAgentAction(params) {
                         include: { items: { include: { product: true } } },
                     });
                     clearAwaitingRemoveProduct(doctor.id, client.id);
-                    const summary = ((_g = updated === null || updated === void 0 ? void 0 : updated.items) === null || _g === void 0 ? void 0 : _g.map((it) => `- ${it.quantity} x ${it.product.name}`).join("\n")) || "Pedido vacío";
-                    await sendMessage(`Listo ✅ Saqué ${qtyToRemove} ${match2.name}.\n\nPedido #${pending.sequenceNumber}:\n${summary}\nTotal: $${(_h = updated === null || updated === void 0 ? void 0 : updated.totalAmount) !== null && _h !== void 0 ? _h : 0}`);
+                    const summary = ((_h = updated === null || updated === void 0 ? void 0 : updated.items) === null || _h === void 0 ? void 0 : _h.map((it) => `- ${it.quantity} x ${it.product.name}`).join("\n")) || "Pedido vacío";
+                    await sendMessage(`Listo ✅ Saqué ${qtyToRemove} ${match2.name}.\n\nPedido #${pending.sequenceNumber}:\n${summary}\nTotal: $${(_j = updated === null || updated === void 0 ? void 0 : updated.totalAmount) !== null && _j !== void 0 ? _j : 0}`);
                     return true;
                 }
             }
@@ -703,7 +729,7 @@ async function handleRetailAgentAction(params) {
             include: { items: { include: { product: true } } },
         });
         const summary = (updated === null || updated === void 0 ? void 0 : updated.items.map((it) => `- ${it.quantity} x ${it.product.name}`).join("\n")) || "Pedido vacío";
-        await sendMessage(`Listo ✅ Saqué ${removeAll ? "todas" : removeQty} ${match.name}.\n\nPedido #${pending.sequenceNumber} :\n${summary}\nTotal: $${(_j = updated === null || updated === void 0 ? void 0 : updated.totalAmount) !== null && _j !== void 0 ? _j : 0}\n\nSi está OK respondé *CONFIRMAR* (o OK / dale / listo) o decime qué querés sumar/quitar.`);
+        await sendMessage(`Listo ✅ Saqué ${removeAll ? "todas" : removeQty} ${match.name}.\n\nPedido #${pending.sequenceNumber} :\n${summary}\nTotal: $${(_k = updated === null || updated === void 0 ? void 0 : updated.totalAmount) !== null && _k !== void 0 ? _k : 0}\n\nSi está OK respondé *CONFIRMAR* (o OK / dale / listo) o decime qué querés sumar/quitar.`);
         return true;
     }
     const incoming = (rawText || "").trim().toLowerCase();
@@ -766,7 +792,7 @@ async function handleRetailAgentAction(params) {
                 where: { id: pending.id },
                 include: { items: { include: { product: true } } },
             });
-            const summary = ((_k = updated === null || updated === void 0 ? void 0 : updated.items) === null || _k === void 0 ? void 0 : _k.length)
+            const summary = ((_l = updated === null || updated === void 0 ? void 0 : updated.items) === null || _l === void 0 ? void 0 : _l.length)
                 ? updated.items.map((it) => `• ${it.quantity} x ${it.product.name}`).join("\n")
                 : "";
             if (!updated || updated.items.length === 0) {
@@ -783,7 +809,7 @@ async function handleRetailAgentAction(params) {
     const msgText = (rawText || "").trim();
     // ✅ Alias/CBU (determinístico)
     if (asksPaymentMethod(msgText)) {
-        const alias = (_m = (_l = doctor === null || doctor === void 0 ? void 0 : doctor.businessAlias) === null || _l === void 0 ? void 0 : _l.trim) === null || _m === void 0 ? void 0 : _m.call(_l);
+        const alias = (_o = (_m = doctor === null || doctor === void 0 ? void 0 : doctor.businessAlias) === null || _m === void 0 ? void 0 : _m.trim) === null || _o === void 0 ? void 0 : _o.call(_m);
         if (!alias) {
             await sendMessage("Todavía no tengo cargado el alias/CBU acá 😕.");
             return true;
@@ -893,7 +919,7 @@ async function handleRetailAgentAction(params) {
         // Agrupar necesidad por producto
         const needByProductId = new Map();
         for (const it of pending.items) {
-            needByProductId.set(it.productId, ((_o = needByProductId.get(it.productId)) !== null && _o !== void 0 ? _o : 0) + it.quantity);
+            needByProductId.set(it.productId, ((_p = needByProductId.get(it.productId)) !== null && _p !== void 0 ? _p : 0) + it.quantity);
         }
         const productIds = Array.from(needByProductId.keys());
         // Chequeo amigable (para decir exactamente qué falta)
@@ -905,9 +931,9 @@ async function handleRetailAgentAction(params) {
         const shortages = [];
         for (const [pid, need] of needByProductId.entries()) {
             const p = prodById.get(pid);
-            const have = (_p = p === null || p === void 0 ? void 0 : p.quantity) !== null && _p !== void 0 ? _p : 0;
+            const have = (_q = p === null || p === void 0 ? void 0 : p.quantity) !== null && _q !== void 0 ? _q : 0;
             if (!p || have < need) {
-                shortages.push({ name: (_q = p === null || p === void 0 ? void 0 : p.name) !== null && _q !== void 0 ? _q : "Producto", have, need });
+                shortages.push({ name: (_r = p === null || p === void 0 ? void 0 : p.name) !== null && _r !== void 0 ? _r : "Producto", have, need });
             }
         }
         if (shortages.length > 0) {
@@ -959,7 +985,7 @@ async function handleRetailAgentAction(params) {
         const summary = (confirmed === null || confirmed === void 0 ? void 0 : confirmed.items.map((it) => `• ${it.quantity} x ${it.product.name}`).join("\n")) || "Pedido vacío";
         await sendMessage(`Listo ✅ envie tu pedido.\n\n` +
             `Pedido #${confirmed === null || confirmed === void 0 ? void 0 : confirmed.sequenceNumber} (estado: Falta revisión):\n${summary}\n` +
-            `Total: $${(_r = confirmed === null || confirmed === void 0 ? void 0 : confirmed.totalAmount) !== null && _r !== void 0 ? _r : 0}`);
+            `Total: $${(_s = confirmed === null || confirmed === void 0 ? void 0 : confirmed.totalAmount) !== null && _s !== void 0 ? _s : 0}`);
         return true;
     }
     if (action.type !== "retail_upsert_order" && action.type !== "retail_cancel_order") {
@@ -1057,8 +1083,8 @@ async function handleRetailAgentAction(params) {
     }
     // "sumar/agregar" => suma cantidades. Si no, setea la cantidad del producto mencionado.
     const addMode = action.mode === "merge" || /\b(sum(ar|ame|á)|agreg(ar|ame|á|alas)|añad(ir|ime|í)|mas|\+)\b/i.test(rawText);
-    const target = (_s = pendingOrders[0]) !== null && _s !== void 0 ? _s : null;
-    const targetOrderId = (_t = target === null || target === void 0 ? void 0 : target.id) !== null && _t !== void 0 ? _t : null;
+    const target = (_t = pendingOrders[0]) !== null && _t !== void 0 ? _t : null;
+    const targetOrderId = (_u = target === null || target === void 0 ? void 0 : target.id) !== null && _u !== void 0 ? _u : null;
     const beforeItemsSnapshot = ((target === null || target === void 0 ? void 0 : target.items) || []).map((it) => {
         var _a, _b;
         const productName = ((_a = products.find((p) => p.id === it.productId)) === null || _a === void 0 ? void 0 : _a.name) || "Producto";
@@ -1080,7 +1106,7 @@ async function handleRetailAgentAction(params) {
         const baseOp = it.op;
         const op = baseOp === "remove" || baseOp === "set" ? baseOp : "add";
         const qty = Math.max(0, Math.trunc(it.quantity || 0));
-        const prev = (_u = currentQuantities.get(it.productId)) !== null && _u !== void 0 ? _u : 0;
+        const prev = (_v = currentQuantities.get(it.productId)) !== null && _v !== void 0 ? _v : 0;
         if (op === "remove") {
             // ✅ si vino cantidad (ej: “quitame 2”), restamos; si vino 0, borramos todo
             const next = qty > 0 ? Math.max(0, prev - qty) : 0;
@@ -1122,9 +1148,9 @@ async function handleRetailAgentAction(params) {
         mode: "replace",
         status: "pending", // siempre queda en revisión; la confirmación real la hace el dueño en el panel
         existingOrderId: targetOrderId,
-        customerName: ((_v = action.clientInfo) === null || _v === void 0 ? void 0 : _v.fullName) || client.fullName || (patient === null || patient === void 0 ? void 0 : patient.fullName) || "Cliente WhatsApp",
-        customerAddress: ((_w = action.clientInfo) === null || _w === void 0 ? void 0 : _w.address) || client.businessAddress || (patient === null || patient === void 0 ? void 0 : patient.address) || null,
-        customerDni: ((_x = action.clientInfo) === null || _x === void 0 ? void 0 : _x.dni) || client.dni || (patient === null || patient === void 0 ? void 0 : patient.dni) || null,
+        customerName: ((_w = action.clientInfo) === null || _w === void 0 ? void 0 : _w.fullName) || client.fullName || (patient === null || patient === void 0 ? void 0 : patient.fullName) || "Cliente WhatsApp",
+        customerAddress: ((_x = action.clientInfo) === null || _x === void 0 ? void 0 : _x.address) || client.businessAddress || (patient === null || patient === void 0 ? void 0 : patient.address) || null,
+        customerDni: ((_y = action.clientInfo) === null || _y === void 0 ? void 0 : _y.dni) || client.dni || (patient === null || patient === void 0 ? void 0 : patient.dni) || null,
     });
     if (!upsert.ok || !upsert.order) {
         await sendMessage("No pude guardar el pedido. Probemos de nuevo indicando los productos.");
@@ -1135,7 +1161,7 @@ async function handleRetailAgentAction(params) {
     if (!order.inventoryDeducted) {
         const needByProductId = new Map();
         for (const it of order.items || []) {
-            needByProductId.set(it.productId, ((_y = needByProductId.get(it.productId)) !== null && _y !== void 0 ? _y : 0) + it.quantity);
+            needByProductId.set(it.productId, ((_z = needByProductId.get(it.productId)) !== null && _z !== void 0 ? _z : 0) + it.quantity);
         }
         const productIds = Array.from(needByProductId.keys());
         const productRows = await prisma_1.prisma.product.findMany({
@@ -1146,9 +1172,9 @@ async function handleRetailAgentAction(params) {
         const shortages = [];
         for (const [pid, need] of needByProductId.entries()) {
             const p = prodById.get(pid);
-            const have = (_z = p === null || p === void 0 ? void 0 : p.quantity) !== null && _z !== void 0 ? _z : 0;
+            const have = (_0 = p === null || p === void 0 ? void 0 : p.quantity) !== null && _0 !== void 0 ? _0 : 0;
             if (!p || have < need) {
-                shortages.push({ name: (_0 = p === null || p === void 0 ? void 0 : p.name) !== null && _0 !== void 0 ? _0 : "Producto", have, need });
+                shortages.push({ name: (_1 = p === null || p === void 0 ? void 0 : p.name) !== null && _1 !== void 0 ? _1 : "Producto", have, need });
             }
         }
         if (shortages.length > 0) {
