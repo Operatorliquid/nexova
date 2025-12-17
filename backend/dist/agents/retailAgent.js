@@ -285,9 +285,10 @@ function formatCatalogForPrompt(catalog) {
         return catalog.slice(0, 80).join(" · ");
     }
     if (Array.isArray(catalog) && catalog.length > 0 && typeof catalog[0] === "object") {
-        return catalog
-            .slice(0, 80)
-            .map((p) => {
+        const truncate = (txt, max = 120) => txt.length > max ? `${txt.slice(0, max - 1).trimEnd()}…` : txt;
+        const categorySet = new Set();
+        const tagSet = new Set();
+        const items = catalog.slice(0, 80).map((p) => {
             var _a, _b;
             const name = p.name || p.title || p.productName;
             const price = (_b = (_a = p.price) !== null && _a !== void 0 ? _a : p.unitPrice) !== null && _b !== void 0 ? _b : null;
@@ -295,9 +296,39 @@ function formatCatalogForPrompt(catalog) {
             const priceText = Number.isFinite(price)
                 ? `$${Number(price).toLocaleString("es-AR")}`
                 : "(precio s/dato)";
-            return `- ${String(name)}${unit ? ` (${unit})` : ""}: ${priceText}`;
-        })
-            .join("\n");
+            const categories = Array.isArray(p.categories) && p.categories.length
+                ? p.categories
+                : p.category
+                    ? [p.category]
+                    : [];
+            const tags = Array.isArray(p.tags) && p.tags.length
+                ? p.tags
+                : Array.isArray(p.tagLabels) && p.tagLabels.length
+                    ? p.tagLabels
+                    : [];
+            categories.forEach((c) => {
+                if (typeof c === "string" && c.trim())
+                    categorySet.add(c.trim());
+            });
+            tags.forEach((t) => {
+                if (typeof t === "string" && t.trim())
+                    tagSet.add(t.trim());
+            });
+            const extras = [];
+            if (categories.length)
+                extras.push(`cat: ${categories.join("/")}`);
+            if (tags.length)
+                extras.push(`tags: ${tags.join("/")}`);
+            if (p.description)
+                extras.push(`desc: ${truncate(String(p.description))}`);
+            const extrasText = extras.length ? ` · ${extras.join(" · ")}` : "";
+            return `- ${String(name)}${unit ? ` (${unit})` : ""}: ${priceText}${extrasText}`;
+        });
+        const catLine = categorySet.size > 0
+            ? `Categorías: ${Array.from(categorySet).slice(0, 30).join(" · ")}`
+            : "Categorías: (no declaradas)";
+        const tagLine = tagSet.size > 0 ? `Etiquetas: ${Array.from(tagSet).slice(0, 40).join(" · ")}` : "Etiquetas: (no declaradas)";
+        return `${catLine}\n${tagLine}\nProductos:\n${items.join("\n")}`;
     }
     return "(catálogo en formato desconocido)";
 }

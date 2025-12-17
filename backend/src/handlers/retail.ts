@@ -200,6 +200,21 @@ const isYes = (txt: string) => {
   );
 };
 
+const isTransferMention = (raw: string) => {
+  const t = normLite(raw || "");
+  if (!t) return false;
+  return (
+    /\btransfe/.test(t) ||
+    /\btransferenc/.test(t) ||
+    /\btransfiri/.test(t) ||
+    /\bpague\b|\bpago\b|\bte pague\b|\bpagado\b/.test(t) ||
+    /\bdeposit/.test(t) ||
+    /\bte (mande|mande|pase|envie) la plata/.test(t) ||
+    /\bte gire/.test(t) ||
+    /\btransferi\b/.test(t)
+  );
+};
+
 const wantsCatalog = (raw: string) => {
   const t = normLite(raw || "");
   if (!t) return false;
@@ -999,6 +1014,44 @@ if (awaitingRemove) {
       return true;
     }
     await sendMessage(formatAliasReply(alias));
+    return true;
+  }
+
+  // ✅ Declaración de transferencia sin comprobante: pedimos el comprobante si no hubo uno reciente
+  if (isTransferMention(msgText)) {
+    const recentProof = await prisma.paymentProof.findFirst({
+      where: { doctorId: doctor.id, clientId: client.id },
+      orderBy: { createdAt: "desc" },
+      select: { id: true, createdAt: true, orderId: true },
+    });
+    const recentWindowMs = 15 * 60 * 1000;
+    const now = Date.now();
+    const hasRecent =
+      recentProof?.createdAt && now - new Date(recentProof.createdAt).getTime() <= recentWindowMs;
+
+    if (!hasRecent) {
+      await sendMessage(
+        "¡Genial! ¿Me pasás el comprobante o captura de la transferencia así lo asigno al pedido?"
+      );
+      return true;
+    }
+
+    if (recentProof.orderId) {
+      const ord = await prisma.order.findUnique({
+        where: { id: recentProof.orderId },
+        select: { sequenceNumber: true },
+      });
+      await sendMessage(
+        ord?.sequenceNumber
+          ? `Ya tengo tu comprobante y lo vinculé al pedido #${ord.sequenceNumber}. ¿Querés revisar algo más?`
+          : "Ya tengo tu comprobante registrado. ¿Querés que lo vincule a algún pedido?"
+      );
+      return true;
+    }
+
+    // Hay comprobante reciente pero sin pedido asignado: pedir solo el número
+    await setAwaitingProofOrderNumber({ doctorId: doctor.id, clientId: client.id });
+    await sendMessage("Ya tengo tu comprobante 👍 ¿Para qué pedido es? Mandame el número (ej: 5).");
     return true;
   }
 
