@@ -203,7 +203,8 @@ const isYes = (txt: string) => {
 const wantsCatalog = (raw: string) => {
   const t = normLite(raw || "");
   if (!t) return false;
-  if (/\bcat(a|á)logo\b/.test(t)) return true;
+  // cubre: catalogo, catálogo, catalog, catalogo?, catalogar no
+  if (/\bcatalo[gq]/.test(t)) return true;
   if (/\blista\s+de\s+precios\b/.test(t)) return true;
   if (/\blista\s+de\s+productos\b/.test(t)) return true;
   if (/\bprecios?\s+(de\s+)?(todo|todos|toda|productos|articulos)\b/.test(t)) return true;

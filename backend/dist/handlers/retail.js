@@ -175,7 +175,8 @@ const wantsCatalog = (raw) => {
     const t = normLite(raw || "");
     if (!t)
         return false;
-    if (/\bcat(a|á)logo\b/.test(t))
+    // cubre: catalogo, catálogo, catalog, catalogo?, catalogar no
+    if (/\bcatalo[gq]/.test(t))
         return true;
     if (/\blista\s+de\s+precios\b/.test(t))
         return true;
