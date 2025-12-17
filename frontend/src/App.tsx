@@ -11761,508 +11761,7 @@ return (
                 </div>
               )}
 
-      {orderModalId !== null && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 px-4">
-          <div className="w-full max-w-4xl rounded-2xl bg-white shadow-2xl p-6 space-y-5">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <h4 className="text-lg font-semibold text-slate-900">Detalle del pedido</h4>
-                        <p className="text-sm text-slate-600">
-                          {(() => {
-                            const ord = orders.find((o) => o.id === orderModalId);
-                            if (!ord) return "";
-                            const createdAtLabel = (() => {
-                              try {
-                                return new Date(ord.createdAt).toLocaleString("es-AR", {
-                                  day: "2-digit",
-                                  month: "2-digit",
-                                  hour: "2-digit",
-                                  minute: "2-digit",
-                                });
-                              } catch {
-                                return "";
-                              }
-                            })();
-                            return `#${ord.sequenceNumber} · ${createdAtLabel}`;
-                          })()}
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          className="btn btn-ghost btn-sm"
-                          onClick={() => setOrderModalId(null)}
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    </div>
-
-                    {(() => {
-                      const ord = orders.find((o) => o.id === orderModalId);
-                      if (!ord)
-                        return <p className="text-sm text-slate-600">Pedido no encontrado.</p>;
-                      return (
-                        <div className="space-y-4">
-                          <div className="border-b border-slate-200 -mt-3 mb-5">
-                            <div className="flex gap-2 items-center justify-between flex-wrap">
-                              {[
-                                { key: "details", label: "Detalle" },
-                                { key: "payments", label: "Pagos" },
-                                { key: "attachments", label: "Comprobantes" },
-                              ].map((tab) => {
-                                const active = orderModalTab === tab.key;
-                                return (
-                                  <button
-                                    key={tab.key}
-                                    type="button"
-                                    onClick={() =>
-                                      setOrderModalTab(tab.key as "details" | "payments")
-                                    }
-                                    className={`px-4 py-2 text-sm font-semibold transition border-b-2 ${
-                                      active
-                                        ? "border-emerald-500 text-slate-900"
-                                        : "border-transparent text-slate-500 hover:text-slate-800 hover:border-slate-200"
-                                    }`}
-                                  >
-                                    {tab.label}
-                                  </button>
-                                );
-                              })}
-                            </div>
-                          </div>
-
-                          {orderModalTab === "details" ? (
-                            <div className="space-y-3">
-                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm text-slate-700">
-                                <p>
-                                  <span className="font-semibold">Cliente:</span>{" "}
-                                  {ord.customerName || "Cliente WhatsApp"}
-                                </p>
-                                <p>
-                                  <span className="font-semibold">Total:</span>{" "}
-                                  ${ord.totalAmount.toLocaleString("es-AR")}
-                                </p>
-                                {ord.customerAddress && (
-                                  <p className="col-span-1 sm:col-span-2">
-                                    <span className="font-semibold">Dirección:</span>{" "}
-                                    {ord.customerAddress}
-                                  </p>
-                                )}
-                                {ord.customerDni && (
-                                  <p>
-                                    <span className="font-semibold">DNI:</span> {ord.customerDni}
-                                  </p>
-                                )}
-                                <p className="capitalize">
-                                  <span className="font-semibold">Estado:</span>{" "}
-                                  {ord.status === "pending" ? "Falta revisión" : ord.status}
-                                </p>
-                                <p>
-                                  <span className="font-semibold">Pago:</span>{" "}
-                                  {ord.paymentStatus === "paid"
-                                    ? "Pagado"
-                                    : ord.paymentStatus === "partial"
-                                    ? "Parcial"
-                                    : "No pagado"}{" "}
-                                  ({(ord.paidAmount || 0).toLocaleString("es-AR")} /{" "}
-                                  {ord.totalAmount.toLocaleString("es-AR")})
-                                </p>
-                              </div>
-                              {!!(ord.promotions && ord.promotions.length) && (
-                                <div className="rounded-xl border border-emerald-700/30 bg-emerald-950/50 px-4 py-3 space-y-2 shadow-sm">
-                                  <div className="flex items-center gap-2 text-emerald-100">
-                                    <span className="text-base">🧾</span>
-                                    <div>
-                                      <p className="text-sm font-semibold leading-tight">
-                                        Promos aplicadas
-                                      </p>
-                                    </div>
-                                  </div>
-                                  <div className="flex flex-wrap gap-2">
-                                    {ord.promotions.map((promo) => (
-                                      <div
-                                        key={promo.id}
-                                        className="inline-flex items-center gap-2 rounded-xl border border-emerald-800 bg-emerald-900/70 px-3 py-2 shadow-inner"
-                                      >
-                                        <div className="flex flex-col leading-tight">
-                                          <span className="text-xs font-semibold text-emerald-50">
-                                            {promo.title}
-                                          </span>
-                                          <span className="text-[11px] text-emerald-200">
-                                            {promo.discountType === "percent"
-                                              ? `-${promo.discountValue}%`
-                                              : `-$${promo.discountValue.toLocaleString("es-AR")}`}
-                                          </span>
-                                        </div>
-                                      </div>
-                                    ))}
-                                  </div>
-                                </div>
-                              )}
-                              <div className="rounded-xl border border-slate-200 overflow-hidden">
-                                <div className="grid grid-cols-4 text-xs font-semibold text-slate-600 px-3 py-2 bg-slate-50">
-                                  <span className="col-span-2">Producto</span>
-                                  <span className="text-right">Cant.</span>
-                                  <span className="text-right">Subtotal</span>
-                                </div>
-                                <div className="divide-y divide-slate-200 text-sm">
-                                  {ord.items.map((item) => (
-                                    <div
-                                      key={item.id}
-                                      className="grid grid-cols-4 px-3 py-2 text-slate-800 items-center"
-                                    >
-                                      <span className="col-span-2">{item.productName}</span>
-                                      <span className="text-right">{item.quantity}</span>
-                                      <span className="text-right">
-                                        ${(item.quantity * item.unitPrice).toLocaleString("es-AR")}
-                                      </span>
-                                    </div>
-                                  ))}
-                                </div>
-                              </div>
-                            </div>
-                          ) : orderModalTab === "payments" ? (
-                            (() => {
-                              const paymentDraft = getPaymentDraft(ord);
-                              const currentPaid = Math.max(0, paymentDraft.base || 0);
-                              const outstanding = Math.max(
-                                0,
-                                (ord.totalAmount || 0) - currentPaid
-                              );
-                              const paymentEntries = paymentDraft.entries || [];
-                              const payStatusLabel =
-                                ord.paymentStatus === "paid"
-                                  ? "Pagado"
-                                  : ord.paymentStatus === "partial"
-                                  ? "Pago parcial"
-                                  : "No pagado";
-                              const payStatusClass =
-                                ord.paymentStatus === "paid"
-                                  ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                                  : ord.paymentStatus === "partial"
-                                  ? "bg-amber-50 text-amber-700 border-amber-200"
-                                  : "bg-slate-100 text-slate-700 border-slate-200";
-
-                              return (
-                                <div className="space-y-4">
-                                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2">
-                                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-                                      <div>
-                                        <p className="text-sm font-semibold text-slate-900">
-                                          Pagos del pedido
-                                        </p>
-                                        <p className="text-xs text-slate-500">
-                                          Pagado ${currentPaid.toLocaleString("es-AR")} / $
-                                          {ord.totalAmount.toLocaleString("es-AR")} · Falta $
-                                          {outstanding.toLocaleString("es-AR")}
-                                        </p>
-                                      </div>
-                                      <div className="flex flex-wrap gap-2">
-                                        <button
-                                          type="button"
-                                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${
-                                            ord.paymentStatus === "unpaid"
-                                              ? "bg-rose-50 text-rose-700 border-rose-200"
-                                              : "bg-white text-slate-700 border-slate-200 hover:border-slate-300"
-                                          } ${paymentDraft.adding ? "opacity-60 cursor-not-allowed" : ""}`}
-                                          onClick={() => handleMarkOrderUnpaid(ord)}
-                                          disabled={paymentDraft.adding || orderUpdatingId === ord.id}
-                                        >
-                                          Pedido no pagado
-                                        </button>
-                                        <button
-                                          type="button"
-                                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-                                            paymentDraft.adding
-                                              ? "bg-emerald-600 text-white shadow-sm"
-                                              : "bg-emerald-100 text-emerald-800 hover:bg-emerald-200"
-                                          }`}
-                                          onClick={() => toggleAddPaymentMode(ord)}
-                                          disabled={orderUpdatingId === ord.id}
-                                        >
-                                          Agregar pago
-                                        </button>
-                                      </div>
-                                    </div>
-
-                                    {paymentDraft.adding && (
-                                      <div className="mt-3 space-y-2 rounded-lg border border-emerald-200 bg-white px-3 py-3">
-                                        <p className="text-xs text-slate-600">Nuevo pago</p>
-                                        <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-                                          <input
-                                            type="number"
-                                            min={0}
-                                            className="w-full sm:w-40 rounded-lg border border-slate-200 px-3 py-2 text-right text-sm focus:outline-none focus:ring-2 focus:ring-emerald-300"
-                                            value={paymentDraft.input}
-                                            onChange={(e) => {
-                                              const val = e.target.value;
-                                              setOrderPaymentDrafts((prev) => {
-                                                const current =
-                                                  prev[ord.id] ?? {
-                                                    base: ord.paidAmount ?? 0,
-                                                    entries: [],
-                                                    adding: true,
-                                                    input: "",
-                                                  };
-                                                return {
-                                                  ...prev,
-                                                  [ord.id]: { ...current, input: val },
-                                                };
-                                              });
-                                            }}
-                                            placeholder="Monto a ingresar"
-                                          />
-                                          <button
-                                            type="button"
-                                            className="btn btn-primary btn-sm disabled:opacity-60"
-                                            onClick={() => handleAddPaymentEntry(ord)}
-                                            disabled={orderUpdatingId === ord.id}
-                                          >
-                                            Añadir
-                                          </button>
-                                        </div>
-                                        <p className="text-[11px] text-slate-500">
-                                          Se suma al total pagado y podés agregar varios.
-                                        </p>
-                                      </div>
-                                    )}
-                                  </div>
-
-                                  <div className="rounded-xl border border-slate-200 bg-white p-3 space-y-3">
-                                    <div className="flex flex-wrap items-center justify-between gap-2">
-                                      <div className="flex flex-col">
-                                        <p className="text-sm font-semibold text-slate-900">
-                                          Pagos registrados
-                                        </p>
-                                        <p className="text-xs text-slate-500">
-                                          Total pagado $
-                                          {currentPaid.toLocaleString("es-AR")} · Falta $
-                                          {outstanding.toLocaleString("es-AR")}
-                                        </p>
-                                      </div>
-                                      <span
-                                        className={`px-3 py-1 rounded-full border text-xs font-semibold ${payStatusClass}`}
-                                      >
-                                        {payStatusLabel}
-                                      </span>
-                                    </div>
-
-                                    {paymentEntries.length === 0 && currentPaid === 0 ? (
-                                      <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-4 text-sm text-slate-500">
-                                        No hay pagos registrados todavía.
-                                      </div>
-                                    ) : (
-                                      <div className="space-y-2">
-                                        {paymentEntries.map((entry) => {
-                                          const createdLabel = (() => {
-                                            try {
-                                              return new Date(entry.createdAt).toLocaleString("es-AR", {
-                                                hour: "2-digit",
-                                                minute: "2-digit",
-                                                day: "2-digit",
-                                                month: "2-digit",
-                                              });
-                                            } catch {
-                                              return "";
-                                            }
-                                          })();
-                                          return (
-                                            <div
-                                              key={entry.id}
-                                              className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-800"
-                                            >
-                                              <div className="space-y-0.5">
-                                                <p className="font-semibold text-slate-900">
-                                                  +${entry.amount.toLocaleString("es-AR")}
-                                                </p>
-                                                <p className="text-[11px] text-slate-500">
-                                                  {createdLabel || "Agregado ahora"}
-                                                </p>
-                                              </div>
-                                              <button
-                                                type="button"
-                                                className="text-xs text-rose-600 hover:text-rose-500 disabled:opacity-50"
-                                                onClick={() =>
-                                                  handleRemovePaymentEntry(ord, entry.id, entry.amount)
-                                                }
-                                                disabled={orderUpdatingId === ord.id}
-                                              >
-                                                Eliminar
-                                              </button>
-                                            </div>
-                                          );
-                                        })}
-
-                                        <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm">
-                                          <span className="text-slate-700">Total registrado</span>
-                                          <span className="font-semibold text-slate-900">
-                                            ${currentPaid.toLocaleString("es-AR")}
-                                          </span>
-                                        </div>
-                                      </div>
-                                    )}
-                                  </div>
-
-                                  {(ord.paymentStatus === "unpaid" || ord.paymentStatus === "partial") && (
-                                    <div className="pt-1">
-                                      <button
-                                        type="button"
-                                        className="btn btn-outline btn-sm"
-                                        onClick={() => {
-                                          const pendingAmount = Math.max(0, outstanding);
-                                          setOrderReminderConfirmId(ord.id);
-                                          setOrderReminderPendingAmount(pendingAmount);
-                                        }}
-                                        disabled={
-                                          orderReminderSendingId === ord.id || orderUpdatingId === ord.id
-                                        }
-                                      >
-                                        {orderReminderSendingId === ord.id
-                                          ? "Enviando..."
-                                          : "Enviar recordatorio"}
-                                      </button>
-                                    </div>
-                                  )}
-                                </div>
-                              );
-                            })()
-                          ) : (
-                            <div className="space-y-3">
-                              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
-                                <div className="space-y-1">
-                                  <p className="text-sm font-semibold text-slate-900">
-                                    Comprobantes del pedido
-                                  </p>
-                                  <p className="text-xs text-slate-500">
-                                    Subí imágenes o PDF relacionados al pedido.
-                                  </p>
-                                  {orderAttachmentError && (
-                                    <p className="text-xs text-rose-600">{orderAttachmentError}</p>
-                                  )}
-                                </div>
-                                <label className="btn btn-primary btn-sm cursor-pointer whitespace-nowrap">
-                                  {orderAttachmentUploadingId === ord.id ? "Subiendo..." : "Subir archivo"}
-                                  <input
-                                    type="file"
-                                    accept="image/*,.pdf"
-                                    className="hidden"
-                                    onChange={(e) => {
-                                      const file = e.target.files?.[0];
-                                      if (file && orderModalId !== null) {
-                                        handleUploadOrderAttachment(orderModalId, file);
-                                      }
-                                      e.target.value = "";
-                                    }}
-                                    disabled={orderAttachmentUploadingId === ord.id}
-                                  />
-                                </label>
-                              </div>
-
-                              {Array.isArray(ord.attachments) && ord.attachments.length > 0 ? (
-                                <div className="rounded-xl border border-slate-200 divide-y divide-slate-200">
-                                  {[...ord.attachments]
-                                    .sort(
-                                      (a, b) =>
-                                        new Date(b.createdAt).getTime() -
-                                        new Date(a.createdAt).getTime()
-                                    )
-                                    .map((att) => {
-                                      const createdLabel = (() => {
-                                        try {
-                                          return new Date(att.createdAt).toLocaleString("es-AR", {
-                                            day: "2-digit",
-                                            month: "2-digit",
-                                            hour: "2-digit",
-                                            minute: "2-digit",
-                                          });
-                                        } catch {
-                                          return "";
-                                        }
-                                      })();
-                                      const fileUrl = buildApiUrl(att.url);
-                                      return (
-                                        <div
-                                          key={att.id}
-                                          className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-3 py-2 text-sm text-slate-800"
-                                        >
-                                          <div className="space-y-0.5">
-                                            <p className="font-semibold">
-                                              {att.filename || "Comprobante"}
-                                            </p>
-                                            <p className="text-xs text-slate-500">{createdLabel}</p>
-                                          </div>
-                                          <a
-                                            href={fileUrl}
-                                            target="_blank"
-                                            rel="noreferrer"
-                                            className="btn btn-outline btn-sm"
-                                          >
-                                            Ver / Descargar
-                                          </a>
-                                        </div>
-                                      );
-                                    })}
-                                </div>
-                              ) : (
-                                <div className="rounded-xl border border-dashed border-slate-200 bg-white px-4 py-6 text-sm text-slate-500 text-center">
-                                  Todavía no hay comprobantes para este pedido.
-                                </div>
-                              )}
-                            </div>
-                          )}
-
-                          <div className="flex justify-between items-center text-sm">
-                            <button
-                              type="button"
-                              className="btn btn-danger btn-sm disabled:opacity-60"
-                              onClick={() => {
-                                if (orderModalId !== null) {
-                                  setOrderDeleteModalId(orderModalId);
-                                }
-                              }}
-                              disabled={orderUpdatingId === orderModalId}
-                            >
-                              Eliminar
-                            </button>
-                            <div className="flex items-center gap-2">
-                              {ord.status === "pending" && (
-                                <button
-                                  type="button"
-                                  className="btn btn-primary btn-sm disabled:opacity-60"
-                                  onClick={() => handleUpdateOrderStatus(ord.id, "confirmed", ord)}
-                                  disabled={orderUpdatingId === orderModalId}
-                                >
-                                  {orderUpdatingId === orderModalId
-                                    ? "Guardando..."
-                                    : "Confirmar e imprimir"}
-                                </button>
-                              )}
-                              {ord.status === "confirmed" && (
-                                <button
-                                  type="button"
-                                  className="btn btn-outline btn-sm"
-                                  onClick={() => printOrderReceipt(ord)}
-                                  disabled={orderUpdatingId === orderModalId}
-                                >
-                                  Imprimir boleta
-                                </button>
-                              )}
-                              <button
-                                type="button"
-                                className="btn btn-ghost btn-sm"
-                                onClick={() => setOrderModalId(null)}
-                              >
-                                Cerrar
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })()}
-          </div>
-        </div>
-      )}
+      
 
       {orderReminderConfirmId !== null && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
@@ -12466,10 +11965,12 @@ return (
                                   </div>
                                 </div>
                                 <div className="flex items-center gap-2">
-                                  <button
+                                    <button
                                     type="button"
                                     className="btn btn-outline btn-sm"
-                                    onClick={() => {
+                                    onClick={(e) => {
+                                      e.preventDefault();
+                                      e.stopPropagation();
                                       setOrderModalTab("details");
                                       setOrderModalId(order.id);
                                     }}
@@ -13608,6 +13109,508 @@ return (
                 </div>
               </section>
             )}
+            {orderModalId !== null && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 px-4">
+          <div className="w-full max-w-4xl rounded-2xl bg-white shadow-2xl p-6 space-y-5">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <h4 className="text-lg font-semibold text-slate-900">Detalle del pedido</h4>
+                        <p className="text-sm text-slate-600">
+                          {(() => {
+                            const ord = orders.find((o) => o.id === orderModalId);
+                            if (!ord) return "";
+                            const createdAtLabel = (() => {
+                              try {
+                                return new Date(ord.createdAt).toLocaleString("es-AR", {
+                                  day: "2-digit",
+                                  month: "2-digit",
+                                  hour: "2-digit",
+                                  minute: "2-digit",
+                                });
+                              } catch {
+                                return "";
+                              }
+                            })();
+                            return `#${ord.sequenceNumber} · ${createdAtLabel}`;
+                          })()}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => setOrderModalId(null)}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </div>
+
+                    {(() => {
+                      const ord = orders.find((o) => o.id === orderModalId);
+                      if (!ord)
+                        return <p className="text-sm text-slate-600">Pedido no encontrado.</p>;
+                      return (
+                        <div className="space-y-4">
+                          <div className="border-b border-slate-200 -mt-3 mb-5">
+                            <div className="flex gap-2 items-center justify-between flex-wrap">
+                              {[
+                                { key: "details", label: "Detalle" },
+                                { key: "payments", label: "Pagos" },
+                                { key: "attachments", label: "Comprobantes" },
+                              ].map((tab) => {
+                                const active = orderModalTab === tab.key;
+                                return (
+                                  <button
+                                    key={tab.key}
+                                    type="button"
+                                    onClick={() =>
+                                      setOrderModalTab(tab.key as "details" | "payments")
+                                    }
+                                    className={`px-4 py-2 text-sm font-semibold transition border-b-2 ${
+                                      active
+                                        ? "border-emerald-500 text-slate-900"
+                                        : "border-transparent text-slate-500 hover:text-slate-800 hover:border-slate-200"
+                                    }`}
+                                  >
+                                    {tab.label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+
+                          {orderModalTab === "details" ? (
+                            <div className="space-y-3">
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm text-slate-700">
+                                <p>
+                                  <span className="font-semibold">Cliente:</span>{" "}
+                                  {ord.customerName || "Cliente WhatsApp"}
+                                </p>
+                                <p>
+                                  <span className="font-semibold">Total:</span>{" "}
+                                  ${ord.totalAmount.toLocaleString("es-AR")}
+                                </p>
+                                {ord.customerAddress && (
+                                  <p className="col-span-1 sm:col-span-2">
+                                    <span className="font-semibold">Dirección:</span>{" "}
+                                    {ord.customerAddress}
+                                  </p>
+                                )}
+                                {ord.customerDni && (
+                                  <p>
+                                    <span className="font-semibold">DNI:</span> {ord.customerDni}
+                                  </p>
+                                )}
+                                <p className="capitalize">
+                                  <span className="font-semibold">Estado:</span>{" "}
+                                  {ord.status === "pending" ? "Falta revisión" : ord.status}
+                                </p>
+                                <p>
+                                  <span className="font-semibold">Pago:</span>{" "}
+                                  {ord.paymentStatus === "paid"
+                                    ? "Pagado"
+                                    : ord.paymentStatus === "partial"
+                                    ? "Parcial"
+                                    : "No pagado"}{" "}
+                                  ({(ord.paidAmount || 0).toLocaleString("es-AR")} /{" "}
+                                  {ord.totalAmount.toLocaleString("es-AR")})
+                                </p>
+                              </div>
+                              {!!(ord.promotions && ord.promotions.length) && (
+                                <div className="rounded-xl border border-emerald-700/30 bg-emerald-950/50 px-4 py-3 space-y-2 shadow-sm">
+                                  <div className="flex items-center gap-2 text-emerald-100">
+                                    <span className="text-base">🧾</span>
+                                    <div>
+                                      <p className="text-sm font-semibold leading-tight">
+                                        Promos aplicadas
+                                      </p>
+                                    </div>
+                                  </div>
+                                  <div className="flex flex-wrap gap-2">
+                                    {ord.promotions.map((promo) => (
+                                      <div
+                                        key={promo.id}
+                                        className="inline-flex items-center gap-2 rounded-xl border border-emerald-800 bg-emerald-900/70 px-3 py-2 shadow-inner"
+                                      >
+                                        <div className="flex flex-col leading-tight">
+                                          <span className="text-xs font-semibold text-emerald-50">
+                                            {promo.title}
+                                          </span>
+                                          <span className="text-[11px] text-emerald-200">
+                                            {promo.discountType === "percent"
+                                              ? `-${promo.discountValue}%`
+                                              : `-$${promo.discountValue.toLocaleString("es-AR")}`}
+                                          </span>
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                              <div className="rounded-xl border border-slate-200 overflow-hidden">
+                                <div className="grid grid-cols-4 text-xs font-semibold text-slate-600 px-3 py-2 bg-slate-50">
+                                  <span className="col-span-2">Producto</span>
+                                  <span className="text-right">Cant.</span>
+                                  <span className="text-right">Subtotal</span>
+                                </div>
+                                <div className="divide-y divide-slate-200 text-sm">
+                                  {ord.items.map((item) => (
+                                    <div
+                                      key={item.id}
+                                      className="grid grid-cols-4 px-3 py-2 text-slate-800 items-center"
+                                    >
+                                      <span className="col-span-2">{item.productName}</span>
+                                      <span className="text-right">{item.quantity}</span>
+                                      <span className="text-right">
+                                        ${(item.quantity * item.unitPrice).toLocaleString("es-AR")}
+                                      </span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            </div>
+                          ) : orderModalTab === "payments" ? (
+                            (() => {
+                              const paymentDraft = getPaymentDraft(ord);
+                              const currentPaid = Math.max(0, paymentDraft.base || 0);
+                              const outstanding = Math.max(
+                                0,
+                                (ord.totalAmount || 0) - currentPaid
+                              );
+                              const paymentEntries = paymentDraft.entries || [];
+                              const payStatusLabel =
+                                ord.paymentStatus === "paid"
+                                  ? "Pagado"
+                                  : ord.paymentStatus === "partial"
+                                  ? "Pago parcial"
+                                  : "No pagado";
+                              const payStatusClass =
+                                ord.paymentStatus === "paid"
+                                  ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                  : ord.paymentStatus === "partial"
+                                  ? "bg-amber-50 text-amber-700 border-amber-200"
+                                  : "bg-slate-100 text-slate-700 border-slate-200";
+
+                              return (
+                                <div className="space-y-4">
+                                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2">
+                                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                                      <div>
+                                        <p className="text-sm font-semibold text-slate-900">
+                                          Pagos del pedido
+                                        </p>
+                                        <p className="text-xs text-slate-500">
+                                          Pagado ${currentPaid.toLocaleString("es-AR")} / $
+                                          {ord.totalAmount.toLocaleString("es-AR")} · Falta $
+                                          {outstanding.toLocaleString("es-AR")}
+                                        </p>
+                                      </div>
+                                      <div className="flex flex-wrap gap-2">
+                                        <button
+                                          type="button"
+                                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${
+                                            ord.paymentStatus === "unpaid"
+                                              ? "bg-rose-50 text-rose-700 border-rose-200"
+                                              : "bg-white text-slate-700 border-slate-200 hover:border-slate-300"
+                                          } ${paymentDraft.adding ? "opacity-60 cursor-not-allowed" : ""}`}
+                                          onClick={() => handleMarkOrderUnpaid(ord)}
+                                          disabled={paymentDraft.adding || orderUpdatingId === ord.id}
+                                        >
+                                          Pedido no pagado
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+                                            paymentDraft.adding
+                                              ? "bg-emerald-600 text-white shadow-sm"
+                                              : "bg-emerald-100 text-emerald-800 hover:bg-emerald-200"
+                                          }`}
+                                          onClick={() => toggleAddPaymentMode(ord)}
+                                          disabled={orderUpdatingId === ord.id}
+                                        >
+                                          Agregar pago
+                                        </button>
+                                      </div>
+                                    </div>
+
+                                    {paymentDraft.adding && (
+                                      <div className="mt-3 space-y-2 rounded-lg border border-emerald-200 bg-white px-3 py-3">
+                                        <p className="text-xs text-slate-600">Nuevo pago</p>
+                                        <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+                                          <input
+                                            type="number"
+                                            min={0}
+                                            className="w-full sm:w-40 rounded-lg border border-slate-200 px-3 py-2 text-right text-sm focus:outline-none focus:ring-2 focus:ring-emerald-300"
+                                            value={paymentDraft.input}
+                                            onChange={(e) => {
+                                              const val = e.target.value;
+                                              setOrderPaymentDrafts((prev) => {
+                                                const current =
+                                                  prev[ord.id] ?? {
+                                                    base: ord.paidAmount ?? 0,
+                                                    entries: [],
+                                                    adding: true,
+                                                    input: "",
+                                                  };
+                                                return {
+                                                  ...prev,
+                                                  [ord.id]: { ...current, input: val },
+                                                };
+                                              });
+                                            }}
+                                            placeholder="Monto a ingresar"
+                                          />
+                                          <button
+                                            type="button"
+                                            className="btn btn-primary btn-sm disabled:opacity-60"
+                                            onClick={() => handleAddPaymentEntry(ord)}
+                                            disabled={orderUpdatingId === ord.id}
+                                          >
+                                            Añadir
+                                          </button>
+                                        </div>
+                                        <p className="text-[11px] text-slate-500">
+                                          Se suma al total pagado y podés agregar varios.
+                                        </p>
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  <div className="rounded-xl border border-slate-200 bg-white p-3 space-y-3">
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                      <div className="flex flex-col">
+                                        <p className="text-sm font-semibold text-slate-900">
+                                          Pagos registrados
+                                        </p>
+                                        <p className="text-xs text-slate-500">
+                                          Total pagado $
+                                          {currentPaid.toLocaleString("es-AR")} · Falta $
+                                          {outstanding.toLocaleString("es-AR")}
+                                        </p>
+                                      </div>
+                                      <span
+                                        className={`px-3 py-1 rounded-full border text-xs font-semibold ${payStatusClass}`}
+                                      >
+                                        {payStatusLabel}
+                                      </span>
+                                    </div>
+
+                                    {paymentEntries.length === 0 && currentPaid === 0 ? (
+                                      <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-4 text-sm text-slate-500">
+                                        No hay pagos registrados todavía.
+                                      </div>
+                                    ) : (
+                                      <div className="space-y-2">
+                                        {paymentEntries.map((entry) => {
+                                          const createdLabel = (() => {
+                                            try {
+                                              return new Date(entry.createdAt).toLocaleString("es-AR", {
+                                                hour: "2-digit",
+                                                minute: "2-digit",
+                                                day: "2-digit",
+                                                month: "2-digit",
+                                              });
+                                            } catch {
+                                              return "";
+                                            }
+                                          })();
+                                          return (
+                                            <div
+                                              key={entry.id}
+                                              className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-800"
+                                            >
+                                              <div className="space-y-0.5">
+                                                <p className="font-semibold text-slate-900">
+                                                  +${entry.amount.toLocaleString("es-AR")}
+                                                </p>
+                                                <p className="text-[11px] text-slate-500">
+                                                  {createdLabel || "Agregado ahora"}
+                                                </p>
+                                              </div>
+                                              <button
+                                                type="button"
+                                                className="text-xs text-rose-600 hover:text-rose-500 disabled:opacity-50"
+                                                onClick={() =>
+                                                  handleRemovePaymentEntry(ord, entry.id, entry.amount)
+                                                }
+                                                disabled={orderUpdatingId === ord.id}
+                                              >
+                                                Eliminar
+                                              </button>
+                                            </div>
+                                          );
+                                        })}
+
+                                        <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm">
+                                          <span className="text-slate-700">Total registrado</span>
+                                          <span className="font-semibold text-slate-900">
+                                            ${currentPaid.toLocaleString("es-AR")}
+                                          </span>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  {(ord.paymentStatus === "unpaid" || ord.paymentStatus === "partial") && (
+                                    <div className="pt-1">
+                                      <button
+                                        type="button"
+                                        className="btn btn-outline btn-sm"
+                                        onClick={() => {
+                                          const pendingAmount = Math.max(0, outstanding);
+                                          setOrderReminderConfirmId(ord.id);
+                                          setOrderReminderPendingAmount(pendingAmount);
+                                        }}
+                                        disabled={
+                                          orderReminderSendingId === ord.id || orderUpdatingId === ord.id
+                                        }
+                                      >
+                                        {orderReminderSendingId === ord.id
+                                          ? "Enviando..."
+                                          : "Enviar recordatorio"}
+                                      </button>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })()
+                          ) : (
+                            <div className="space-y-3">
+                              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+                                <div className="space-y-1">
+                                  <p className="text-sm font-semibold text-slate-900">
+                                    Comprobantes del pedido
+                                  </p>
+                                  <p className="text-xs text-slate-500">
+                                    Subí imágenes o PDF relacionados al pedido.
+                                  </p>
+                                  {orderAttachmentError && (
+                                    <p className="text-xs text-rose-600">{orderAttachmentError}</p>
+                                  )}
+                                </div>
+                                <label className="btn btn-primary btn-sm cursor-pointer whitespace-nowrap">
+                                  {orderAttachmentUploadingId === ord.id ? "Subiendo..." : "Subir archivo"}
+                                  <input
+                                    type="file"
+                                    accept="image/*,.pdf"
+                                    className="hidden"
+                                    onChange={(e) => {
+                                      const file = e.target.files?.[0];
+                                      if (file && orderModalId !== null) {
+                                        handleUploadOrderAttachment(orderModalId, file);
+                                      }
+                                      e.target.value = "";
+                                    }}
+                                    disabled={orderAttachmentUploadingId === ord.id}
+                                  />
+                                </label>
+                              </div>
+
+                              {Array.isArray(ord.attachments) && ord.attachments.length > 0 ? (
+                                <div className="rounded-xl border border-slate-200 divide-y divide-slate-200">
+                                  {[...ord.attachments]
+                                    .sort(
+                                      (a, b) =>
+                                        new Date(b.createdAt).getTime() -
+                                        new Date(a.createdAt).getTime()
+                                    )
+                                    .map((att) => {
+                                      const createdLabel = (() => {
+                                        try {
+                                          return new Date(att.createdAt).toLocaleString("es-AR", {
+                                            day: "2-digit",
+                                            month: "2-digit",
+                                            hour: "2-digit",
+                                            minute: "2-digit",
+                                          });
+                                        } catch {
+                                          return "";
+                                        }
+                                      })();
+                                      const fileUrl = buildApiUrl(att.url);
+                                      return (
+                                        <div
+                                          key={att.id}
+                                          className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-3 py-2 text-sm text-slate-800"
+                                        >
+                                          <div className="space-y-0.5">
+                                            <p className="font-semibold">
+                                              {att.filename || "Comprobante"}
+                                            </p>
+                                            <p className="text-xs text-slate-500">{createdLabel}</p>
+                                          </div>
+                                          <a
+                                            href={fileUrl}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="btn btn-outline btn-sm"
+                                          >
+                                            Ver / Descargar
+                                          </a>
+                                        </div>
+                                      );
+                                    })}
+                                </div>
+                              ) : (
+                                <div className="rounded-xl border border-dashed border-slate-200 bg-white px-4 py-6 text-sm text-slate-500 text-center">
+                                  Todavía no hay comprobantes para este pedido.
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          <div className="flex justify-between items-center text-sm">
+                            <button
+                              type="button"
+                              className="btn btn-danger btn-sm disabled:opacity-60"
+                              onClick={() => {
+                                if (orderModalId !== null) {
+                                  setOrderDeleteModalId(orderModalId);
+                                }
+                              }}
+                              disabled={orderUpdatingId === orderModalId}
+                            >
+                              Eliminar
+                            </button>
+                            <div className="flex items-center gap-2">
+                              {ord.status === "pending" && (
+                                <button
+                                  type="button"
+                                  className="btn btn-primary btn-sm disabled:opacity-60"
+                                  onClick={() => handleUpdateOrderStatus(ord.id, "confirmed", ord)}
+                                  disabled={orderUpdatingId === orderModalId}
+                                >
+                                  {orderUpdatingId === orderModalId
+                                    ? "Guardando..."
+                                    : "Confirmar e imprimir"}
+                                </button>
+                              )}
+                              {ord.status === "confirmed" && (
+                                <button
+                                  type="button"
+                                  className="btn btn-outline btn-sm"
+                                  onClick={() => printOrderReceipt(ord)}
+                                  disabled={orderUpdatingId === orderModalId}
+                                >
+                                  Imprimir boleta
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                className="btn btn-ghost btn-sm"
+                                onClick={() => setOrderModalId(null)}
+                              >
+                                Cerrar
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })()}
+          </div>
+        </div>
+      )}
           </div>
         {automationAssistantOpen && (
           <div className="fixed bottom-24 right-6 w-full max-w-md z-40">

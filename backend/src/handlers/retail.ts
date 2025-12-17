@@ -268,6 +268,29 @@ function parseProofCandidateFromLastBotMessage(lastBotMsg: string): number | nul
   return extractOrderSeqFromText(lastBotMsg);
 }
 
+
+// ✅ Estado en memoria: el bot preguntó “¿de qué producto querés quitar X?”
+const awaitingRemoveProductMap = new Map<string, { qty: number | null; ts: number }>();
+
+const setAwaitingRemoveProduct = (doctorId: number, clientId: number, qty: number | null) => {
+  awaitingRemoveProductMap.set(`${doctorId}:${clientId}`, { qty, ts: Date.now() });
+};
+
+const getAwaitingRemoveProduct = (doctorId: number, clientId: number) => {
+  const key = `${doctorId}:${clientId}`;
+  const v = awaitingRemoveProductMap.get(key);
+  if (!v) return null;
+  if (Date.now() - v.ts > 5 * 60 * 1000) {
+    awaitingRemoveProductMap.delete(key);
+    return null;
+  }
+  return v;
+};
+
+const clearAwaitingRemoveProduct = (doctorId: number, clientId: number) => {
+  awaitingRemoveProductMap.delete(`${doctorId}:${clientId}`);
+};
+
 // Estado en memoria para "estoy esperando #pedido para asignar comprobante"
 const awaitingProofMap = new Map<string, number>();
 
@@ -530,10 +553,12 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
   // ===============================
   // ✅ Interceptor “quitar/sacar/borrar” (sin IA)
   // ===============================
-  const removeIncoming = (rawText || "").trim().toLowerCase();
+  // ✅ IMPORTANTE: normalizar (saca acentos) para que “Quítame” = “quitame”
+const removeIncoming = norm(rawText || "");
 
-  const isRemoveIntent =
-    /\b(quit(a|ame|á)|sac(a|ame|á)|elimin(a|ame|á)|borra|borrame|borrar|sin)\b/i.test(removeIncoming);
+const isRemoveIntent = /\b(quit(ar|ame|a)?|quitar|sac(ar|ame|a)?|sacar|elimin(ar|ame|a)?|borra(r|me)?|borrame|borrar|sin)\b/i.test(
+  removeIncoming
+);
 
   if (isRemoveIntent) {
     const pending = await prisma.order.findFirst({
@@ -548,6 +573,95 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
       );
       return true;
     }
+
+    // ===============================
+// ✅ Follow-up de “¿de qué producto querés quitar?”
+// Ej: Cliente: "Quitame 1" -> Bot pregunta producto -> Cliente: "1 cif"
+// ===============================
+const awaitingRemove = getAwaitingRemoveProduct(doctor.id, client.id);
+
+if (awaitingRemove) {
+  const follow = norm(rawText || "");
+
+  // Si el mensaje parece un producto (y no es confirmación/pago/etc), intentamos quitar
+  if (follow && !isConfirmText(rawText || "") && !asksPaymentMethod(rawText || "")) {
+    const pending = await prisma.order.findFirst({
+      where: { doctorId: doctor.id, clientId: client.id, status: "pending" },
+      include: { items: { include: { product: true } } },
+      orderBy: { createdAt: "desc" },
+    });
+
+    if (pending?.items?.length) {
+      // qty: si el cliente mandó un número acá, lo usamos; si no, usamos el guardado
+      let qty2: number | null = null;
+      const digit = follow.match(/\b(\d+)\b/);
+      if (digit?.[1]) qty2 = parseInt(digit[1], 10);
+
+      const qtyToRemove = qty2 ?? awaitingRemove.qty ?? 1;
+
+      // candidate = texto sin números/stopwords
+      let candidate2 = follow
+        .replace(/\b\d+\b/g, " ")
+        .replace(/\b(un|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|de|del|la|el|los|las)\b/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+      const productIdsInOrder = new Set(pending.items.map((it) => it.productId));
+      const catalogInOrder = products.filter((p) => productIdsInOrder.has(p.id));
+
+      const { product: match2, score: score2 } = matchProductName(candidate2, catalogInOrder);
+
+      if (!match2 || score2 <= 0) {
+        const options = pending.items.map((it) => it.product.name).join(", ");
+        await sendMessage(`No entendí cuál. En tu pedido tengo: ${options}. Decime cuál querés quitar.`);
+        return true;
+      }
+
+      const existing2 = pending.items.find((it) => it.productId === match2.id);
+      if (!existing2) {
+        await sendMessage(`No veo "${match2.name}" en tu pedido actual.`);
+        return true;
+      }
+
+      const nextQty2 = existing2.quantity - qtyToRemove;
+
+      await prisma.$transaction(async (tx) => {
+        if (nextQty2 <= 0) {
+          await tx.orderItem.deleteMany({ where: { orderId: pending.id, productId: match2.id } });
+        } else {
+          await tx.orderItem.updateMany({
+            where: { orderId: pending.id, productId: match2.id },
+            data: { quantity: nextQty2 },
+          });
+        }
+
+        const items = await tx.orderItem.findMany({
+          where: { orderId: pending.id },
+          select: { quantity: true, unitPrice: true },
+        });
+
+        const totalAmount = items.reduce((acc, it) => acc + it.quantity * it.unitPrice, 0);
+        await tx.order.update({ where: { id: pending.id }, data: { totalAmount } });
+      });
+
+      const updated = await prisma.order.findUnique({
+        where: { id: pending.id },
+        include: { items: { include: { product: true } } },
+      });
+
+      clearAwaitingRemoveProduct(doctor.id, client.id);
+
+      const summary =
+        updated?.items?.map((it) => `- ${it.quantity} x ${it.product.name}`).join("\n") || "Pedido vacío";
+
+      await sendMessage(
+        `Listo ✅ Saqué ${qtyToRemove} ${match2.name}.\n\nPedido #${pending.sequenceNumber}:\n${summary}\nTotal: $${updated?.totalAmount ?? 0}`
+      );
+      return true;
+    }
+  }
+}
+
 
     await restockOrderInventory(pending);
 
@@ -591,13 +705,18 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
       .replace(/\s+/g, " ")
       .trim();
 
-    if (!candidate) {
-      const options = pending.items.map((it) => it.product.name).join(", ");
-      await sendMessage(
-        `¿Qué querés quitar? Podés decir: "quitá coca" o "quitá 2 galletitas".\n\nEn tu pedido tengo: ${options}`
-      );
-      return true;
-    }
+ if (!candidate) {
+  // ✅ guardamos que estamos esperando el producto, con la qty si vino (“quitame 1”)
+  setAwaitingRemoveProduct(doctor.id, client.id, qty ?? null);
+
+  const options = pending.items.map((it) => it.product.name).join(", ");
+  await sendMessage(
+    `¿Querés que te quite ${qty ?? 1} unidad${(qty ?? 1) === 1 ? "" : "es"} de qué producto? ` +
+      `Tenés: ${options}`
+  );
+  return true;
+}
+
 
     // Match contra productos que están EN el pedido (más seguro)
     const productIdsInOrder = new Set(pending.items.map((it) => it.productId));
