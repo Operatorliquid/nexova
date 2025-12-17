@@ -1036,46 +1036,64 @@ if (awaitingRemove) {
 
   // ✅ Declaración de transferencia sin comprobante: pedimos el comprobante si no hubo uno reciente
   if (isTransferMention(msgText)) {
-    if (shouldSkipProofRequest(doctor.id, client.id)) {
-      // Ya preguntamos hace poco; seguimos con el flujo normal para no encajonar la conversación
-    } else {
-      const recentProof = await prisma.paymentProof.findFirst({
-        where: { doctorId: doctor.id, clientId: client.id },
-        orderBy: { createdAt: "desc" },
-        select: { id: true, createdAt: true, orderId: true },
+    const pending = await prisma.order.findFirst({
+      where: { doctorId: doctor.id, clientId: client.id, status: "pending" },
+      select: { sequenceNumber: true, items: { select: { quantity: true, product: { select: { name: true } } } } },
+      orderBy: { createdAt: "desc" },
+    });
+
+    const recentProof = await prisma.paymentProof.findFirst({
+      where: { doctorId: doctor.id, clientId: client.id },
+      orderBy: { createdAt: "desc" },
+      select: { id: true, createdAt: true, orderId: true },
+    });
+    const recentWindowMs = 15 * 60 * 1000;
+    const now = Date.now();
+    const hasRecent =
+      recentProof?.createdAt && now - new Date(recentProof.createdAt).getTime() <= recentWindowMs;
+
+    if (hasRecent && recentProof?.orderId) {
+      const ord = await prisma.order.findUnique({
+        where: { id: recentProof.orderId },
+        select: { sequenceNumber: true },
       });
-      const recentWindowMs = 15 * 60 * 1000;
-      const now = Date.now();
-      const hasRecent =
-        recentProof?.createdAt && now - new Date(recentProof.createdAt).getTime() <= recentWindowMs;
+      await sendMessage(
+        ord?.sequenceNumber
+          ? `Ya tengo tu comprobante y lo vinculé al pedido #${ord.sequenceNumber}. ¿Querés revisar algo más?`
+          : "Ya tengo tu comprobante registrado. ¿Querés que lo vincule a algún pedido?"
+      );
+      markProofRequestCooldown(doctor.id, client.id);
+      return true;
+    }
 
-      if (!hasRecent) {
-        markProofRequestCooldown(doctor.id, client.id);
-        await sendMessage(
-          "¡Genial! ¿Me pasás el comprobante o captura de la transferencia así lo asigno al pedido?"
-        );
-        return true;
-      }
-
-      if (recentProof.orderId) {
-        const ord = await prisma.order.findUnique({
-          where: { id: recentProof.orderId },
-          select: { sequenceNumber: true },
-        });
-        await sendMessage(
-          ord?.sequenceNumber
-            ? `Ya tengo tu comprobante y lo vinculé al pedido #${ord.sequenceNumber}. ¿Querés revisar algo más?`
-            : "Ya tengo tu comprobante registrado. ¿Querés que lo vincule a algún pedido?"
-        );
-        return true;
-      }
-
-      // Hay comprobante reciente pero sin pedido asignado: pedir solo el número
+    if (hasRecent && !recentProof?.orderId) {
       markProofRequestCooldown(doctor.id, client.id);
       await setAwaitingProofOrderNumber({ doctorId: doctor.id, clientId: client.id });
       await sendMessage("Ya tengo tu comprobante 👍 ¿Para qué pedido es? Mandame el número (ej: 5).");
       return true;
     }
+
+    // Si ya preguntamos hace poco, no insistimos; damos acuse simple y seguimos.
+    if (shouldSkipProofRequest(doctor.id, client.id)) {
+      const hint = pending?.sequenceNumber
+        ? `Cuando puedas, mandá el comprobante y lo asigno al pedido #${pending.sequenceNumber}.`
+        : "Cuando puedas, mandá el comprobante y lo asigno al pedido.";
+      await sendMessage(hint);
+      return true;
+    }
+
+    markProofRequestCooldown(doctor.id, client.id);
+    const itemsText =
+      pending?.items?.length && pending.items.length <= 3
+        ? pending.items.map((it) => `${it.quantity}x ${it.product.name}`).join(", ")
+        : null;
+    const orderPart = pending?.sequenceNumber
+      ? ` para el pedido #${pending.sequenceNumber}${itemsText ? ` (${itemsText})` : ""}`
+      : "";
+    await sendMessage(
+      `¡Genial! ¿Me pasás el comprobante o captura de la transferencia${orderPart} así lo asigno?`
+    );
+    return true;
   }
 
   // ✅ Asignación de comprobantes (intercepta antes de confirmar pedido)

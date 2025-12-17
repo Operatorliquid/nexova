@@ -376,7 +376,7 @@ async function getAwaitingProofOrderNumber(params) {
     return true;
 }
 async function handleRetailAgentAction(params) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _0, _1;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _0, _1, _2;
     const { doctor, patient, retailClient, action, replyToPatient, phoneE164, doctorNumber, doctorWhatsappConfig, rawText, } = params;
     let client = retailClient;
     const products = await prisma_1.prisma.product.findMany({
@@ -849,39 +849,53 @@ async function handleRetailAgentAction(params) {
     }
     // ✅ Declaración de transferencia sin comprobante: pedimos el comprobante si no hubo uno reciente
     if (isTransferMention(msgText)) {
-        if (shouldSkipProofRequest(doctor.id, client.id)) {
-            // Ya preguntamos hace poco; seguimos con el flujo normal para no encajonar la conversación
-        }
-        else {
-            const recentProof = await prisma_1.prisma.paymentProof.findFirst({
-                where: { doctorId: doctor.id, clientId: client.id },
-                orderBy: { createdAt: "desc" },
-                select: { id: true, createdAt: true, orderId: true },
+        const pending = await prisma_1.prisma.order.findFirst({
+            where: { doctorId: doctor.id, clientId: client.id, status: "pending" },
+            select: { sequenceNumber: true, items: { select: { quantity: true, product: { select: { name: true } } } } },
+            orderBy: { createdAt: "desc" },
+        });
+        const recentProof = await prisma_1.prisma.paymentProof.findFirst({
+            where: { doctorId: doctor.id, clientId: client.id },
+            orderBy: { createdAt: "desc" },
+            select: { id: true, createdAt: true, orderId: true },
+        });
+        const recentWindowMs = 15 * 60 * 1000;
+        const now = Date.now();
+        const hasRecent = (recentProof === null || recentProof === void 0 ? void 0 : recentProof.createdAt) && now - new Date(recentProof.createdAt).getTime() <= recentWindowMs;
+        if (hasRecent && (recentProof === null || recentProof === void 0 ? void 0 : recentProof.orderId)) {
+            const ord = await prisma_1.prisma.order.findUnique({
+                where: { id: recentProof.orderId },
+                select: { sequenceNumber: true },
             });
-            const recentWindowMs = 15 * 60 * 1000;
-            const now = Date.now();
-            const hasRecent = (recentProof === null || recentProof === void 0 ? void 0 : recentProof.createdAt) && now - new Date(recentProof.createdAt).getTime() <= recentWindowMs;
-            if (!hasRecent) {
-                markProofRequestCooldown(doctor.id, client.id);
-                await sendMessage("¡Genial! ¿Me pasás el comprobante o captura de la transferencia así lo asigno al pedido?");
-                return true;
-            }
-            if (recentProof.orderId) {
-                const ord = await prisma_1.prisma.order.findUnique({
-                    where: { id: recentProof.orderId },
-                    select: { sequenceNumber: true },
-                });
-                await sendMessage((ord === null || ord === void 0 ? void 0 : ord.sequenceNumber)
-                    ? `Ya tengo tu comprobante y lo vinculé al pedido #${ord.sequenceNumber}. ¿Querés revisar algo más?`
-                    : "Ya tengo tu comprobante registrado. ¿Querés que lo vincule a algún pedido?");
-                return true;
-            }
-            // Hay comprobante reciente pero sin pedido asignado: pedir solo el número
+            await sendMessage((ord === null || ord === void 0 ? void 0 : ord.sequenceNumber)
+                ? `Ya tengo tu comprobante y lo vinculé al pedido #${ord.sequenceNumber}. ¿Querés revisar algo más?`
+                : "Ya tengo tu comprobante registrado. ¿Querés que lo vincule a algún pedido?");
+            markProofRequestCooldown(doctor.id, client.id);
+            return true;
+        }
+        if (hasRecent && !(recentProof === null || recentProof === void 0 ? void 0 : recentProof.orderId)) {
             markProofRequestCooldown(doctor.id, client.id);
             await setAwaitingProofOrderNumber({ doctorId: doctor.id, clientId: client.id });
             await sendMessage("Ya tengo tu comprobante 👍 ¿Para qué pedido es? Mandame el número (ej: 5).");
             return true;
         }
+        // Si ya preguntamos hace poco, no insistimos; damos acuse simple y seguimos.
+        if (shouldSkipProofRequest(doctor.id, client.id)) {
+            const hint = (pending === null || pending === void 0 ? void 0 : pending.sequenceNumber)
+                ? `Cuando puedas, mandá el comprobante y lo asigno al pedido #${pending.sequenceNumber}.`
+                : "Cuando puedas, mandá el comprobante y lo asigno al pedido.";
+            await sendMessage(hint);
+            return true;
+        }
+        markProofRequestCooldown(doctor.id, client.id);
+        const itemsText = ((_p = pending === null || pending === void 0 ? void 0 : pending.items) === null || _p === void 0 ? void 0 : _p.length) && pending.items.length <= 3
+            ? pending.items.map((it) => `${it.quantity}x ${it.product.name}`).join(", ")
+            : null;
+        const orderPart = (pending === null || pending === void 0 ? void 0 : pending.sequenceNumber)
+            ? ` para el pedido #${pending.sequenceNumber}${itemsText ? ` (${itemsText})` : ""}`
+            : "";
+        await sendMessage(`¡Genial! ¿Me pasás el comprobante o captura de la transferencia${orderPart} así lo asigno?`);
+        return true;
     }
     // ✅ Asignación de comprobantes (intercepta antes de confirmar pedido)
     const lastBotMsgRow = await prisma_1.prisma.message.findFirst({
@@ -985,7 +999,7 @@ async function handleRetailAgentAction(params) {
         // Agrupar necesidad por producto
         const needByProductId = new Map();
         for (const it of pending.items) {
-            needByProductId.set(it.productId, ((_p = needByProductId.get(it.productId)) !== null && _p !== void 0 ? _p : 0) + it.quantity);
+            needByProductId.set(it.productId, ((_q = needByProductId.get(it.productId)) !== null && _q !== void 0 ? _q : 0) + it.quantity);
         }
         const productIds = Array.from(needByProductId.keys());
         // Chequeo amigable (para decir exactamente qué falta)
@@ -997,9 +1011,9 @@ async function handleRetailAgentAction(params) {
         const shortages = [];
         for (const [pid, need] of needByProductId.entries()) {
             const p = prodById.get(pid);
-            const have = (_q = p === null || p === void 0 ? void 0 : p.quantity) !== null && _q !== void 0 ? _q : 0;
+            const have = (_r = p === null || p === void 0 ? void 0 : p.quantity) !== null && _r !== void 0 ? _r : 0;
             if (!p || have < need) {
-                shortages.push({ name: (_r = p === null || p === void 0 ? void 0 : p.name) !== null && _r !== void 0 ? _r : "Producto", have, need });
+                shortages.push({ name: (_s = p === null || p === void 0 ? void 0 : p.name) !== null && _s !== void 0 ? _s : "Producto", have, need });
             }
         }
         if (shortages.length > 0) {
@@ -1051,7 +1065,7 @@ async function handleRetailAgentAction(params) {
         const summary = (confirmed === null || confirmed === void 0 ? void 0 : confirmed.items.map((it) => `• ${it.quantity} x ${it.product.name}`).join("\n")) || "Pedido vacío";
         await sendMessage(`Listo ✅ envie tu pedido.\n\n` +
             `Pedido #${confirmed === null || confirmed === void 0 ? void 0 : confirmed.sequenceNumber} (estado: Falta revisión):\n${summary}\n` +
-            `Total: $${(_s = confirmed === null || confirmed === void 0 ? void 0 : confirmed.totalAmount) !== null && _s !== void 0 ? _s : 0}`);
+            `Total: $${(_t = confirmed === null || confirmed === void 0 ? void 0 : confirmed.totalAmount) !== null && _t !== void 0 ? _t : 0}`);
         return true;
     }
     if (action.type !== "retail_upsert_order" && action.type !== "retail_cancel_order") {
@@ -1149,8 +1163,8 @@ async function handleRetailAgentAction(params) {
     }
     // "sumar/agregar" => suma cantidades. Si no, setea la cantidad del producto mencionado.
     const addMode = action.mode === "merge" || /\b(sum(ar|ame|á)|agreg(ar|ame|á|alas)|añad(ir|ime|í)|mas|\+)\b/i.test(rawText);
-    const target = (_t = pendingOrders[0]) !== null && _t !== void 0 ? _t : null;
-    const targetOrderId = (_u = target === null || target === void 0 ? void 0 : target.id) !== null && _u !== void 0 ? _u : null;
+    const target = (_u = pendingOrders[0]) !== null && _u !== void 0 ? _u : null;
+    const targetOrderId = (_v = target === null || target === void 0 ? void 0 : target.id) !== null && _v !== void 0 ? _v : null;
     const beforeItemsSnapshot = ((target === null || target === void 0 ? void 0 : target.items) || []).map((it) => {
         var _a, _b;
         const productName = ((_a = products.find((p) => p.id === it.productId)) === null || _a === void 0 ? void 0 : _a.name) || "Producto";
@@ -1172,7 +1186,7 @@ async function handleRetailAgentAction(params) {
         const baseOp = it.op;
         const op = baseOp === "remove" || baseOp === "set" ? baseOp : "add";
         const qty = Math.max(0, Math.trunc(it.quantity || 0));
-        const prev = (_v = currentQuantities.get(it.productId)) !== null && _v !== void 0 ? _v : 0;
+        const prev = (_w = currentQuantities.get(it.productId)) !== null && _w !== void 0 ? _w : 0;
         if (op === "remove") {
             // ✅ si vino cantidad (ej: “quitame 2”), restamos; si vino 0, borramos todo
             const next = qty > 0 ? Math.max(0, prev - qty) : 0;
@@ -1214,9 +1228,9 @@ async function handleRetailAgentAction(params) {
         mode: "replace",
         status: "pending", // siempre queda en revisión; la confirmación real la hace el dueño en el panel
         existingOrderId: targetOrderId,
-        customerName: ((_w = action.clientInfo) === null || _w === void 0 ? void 0 : _w.fullName) || client.fullName || (patient === null || patient === void 0 ? void 0 : patient.fullName) || "Cliente WhatsApp",
-        customerAddress: ((_x = action.clientInfo) === null || _x === void 0 ? void 0 : _x.address) || client.businessAddress || (patient === null || patient === void 0 ? void 0 : patient.address) || null,
-        customerDni: ((_y = action.clientInfo) === null || _y === void 0 ? void 0 : _y.dni) || client.dni || (patient === null || patient === void 0 ? void 0 : patient.dni) || null,
+        customerName: ((_x = action.clientInfo) === null || _x === void 0 ? void 0 : _x.fullName) || client.fullName || (patient === null || patient === void 0 ? void 0 : patient.fullName) || "Cliente WhatsApp",
+        customerAddress: ((_y = action.clientInfo) === null || _y === void 0 ? void 0 : _y.address) || client.businessAddress || (patient === null || patient === void 0 ? void 0 : patient.address) || null,
+        customerDni: ((_z = action.clientInfo) === null || _z === void 0 ? void 0 : _z.dni) || client.dni || (patient === null || patient === void 0 ? void 0 : patient.dni) || null,
     });
     if (!upsert.ok || !upsert.order) {
         await sendMessage("No pude guardar el pedido. Probemos de nuevo indicando los productos.");
@@ -1227,7 +1241,7 @@ async function handleRetailAgentAction(params) {
     if (!order.inventoryDeducted) {
         const needByProductId = new Map();
         for (const it of order.items || []) {
-            needByProductId.set(it.productId, ((_z = needByProductId.get(it.productId)) !== null && _z !== void 0 ? _z : 0) + it.quantity);
+            needByProductId.set(it.productId, ((_0 = needByProductId.get(it.productId)) !== null && _0 !== void 0 ? _0 : 0) + it.quantity);
         }
         const productIds = Array.from(needByProductId.keys());
         const productRows = await prisma_1.prisma.product.findMany({
@@ -1238,9 +1252,9 @@ async function handleRetailAgentAction(params) {
         const shortages = [];
         for (const [pid, need] of needByProductId.entries()) {
             const p = prodById.get(pid);
-            const have = (_0 = p === null || p === void 0 ? void 0 : p.quantity) !== null && _0 !== void 0 ? _0 : 0;
+            const have = (_1 = p === null || p === void 0 ? void 0 : p.quantity) !== null && _1 !== void 0 ? _1 : 0;
             if (!p || have < need) {
-                shortages.push({ name: (_1 = p === null || p === void 0 ? void 0 : p.name) !== null && _1 !== void 0 ? _1 : "Producto", have, need });
+                shortages.push({ name: (_2 = p === null || p === void 0 ? void 0 : p.name) !== null && _2 !== void 0 ? _2 : "Producto", have, need });
             }
         }
         if (shortages.length > 0) {
