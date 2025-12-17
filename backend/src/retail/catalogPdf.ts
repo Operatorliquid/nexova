@@ -30,13 +30,13 @@ const formatDate = (date: Date) =>
 
 const formatCurrency = (value?: number | null) => {
   if (typeof value === "number" && Number.isFinite(value)) {
-    return new Intl.NumberFormat("es-AR", {
+    return `${new Intl.NumberFormat("es-AR", {
       style: "currency",
       currency: "ARS",
       maximumFractionDigits: 0,
-    }).format(value);
+    }).format(value)} / unidad`;
   }
-  return "Consultar precio";
+  return "Consultar precio / unidad";
 };
 
 const buildPublicUrl = (value: string | null | undefined) => {
@@ -112,6 +112,8 @@ const buildCatalogPdfBuffer = async (params: CatalogPdfParams) => {
   const accent = rgb(0.09, 0.57, 0.49);
   const softBg = rgb(0.96, 0.98, 0.99);
   const border = rgb(0.82, 0.88, 0.9);
+  const textColor = rgb(0.1, 0.1, 0.1);
+  const muted = rgb(0.25, 0.28, 0.3);
 
   let currentPage = page;
   let currentY = pageHeight - margin;
@@ -180,9 +182,9 @@ const buildCatalogPdfBuffer = async (params: CatalogPdfParams) => {
 
     currentPage.drawRectangle({
       x: margin,
-      y: pageHeight - 110,
+      y: pageHeight - 112,
       width: pageWidth - margin * 2,
-      height: 4,
+      height: 3,
       color: accent,
     });
 
@@ -207,14 +209,14 @@ const buildCatalogPdfBuffer = async (params: CatalogPdfParams) => {
   const drawProduct = async (product: CatalogPdfProduct) => {
     const embeddedImage = product.imageUrl ? await getImage(product.imageUrl) : null;
     const hasImage = Boolean(embeddedImage);
-    const maxImgWidth = 90;
+    const maxImgWidth = 80;
     const imgScale =
       embeddedImage && embeddedImage.width > 0 ? Math.min(1, maxImgWidth / embeddedImage.width) : 1;
     const imgWidth = hasImage ? embeddedImage!.width * imgScale : 0;
     const imgHeight = hasImage ? embeddedImage!.height * imgScale : 0;
 
     const textX = margin + (hasImage ? imgWidth + 12 : 0);
-    const textWidth = usableWidth - (textX - margin);
+    const textWidth = usableWidth - (textX - margin) - 40; // deja espacio para el precio a la derecha
 
     const priceLabel = formatCurrency(product.price ?? null);
     const titleLines = wrapText(product.name, titleFont, 14, textWidth);
@@ -222,11 +224,13 @@ const buildCatalogPdfBuffer = async (params: CatalogPdfParams) => {
     const descLines = desc ? wrapText(desc, bodyFont, 11, textWidth) : [];
 
     const textContentHeight =
-      titleLines.length * 15 + 18 + (descLines.length ? descLines.length * 13 + 6 : 0);
+      titleLines.length * 15 +
+      16 + // espacio del precio
+      (descLines.length ? descLines.length * 13 + 4 : 0);
     const contentHeight = Math.max(textContentHeight, imgHeight || 0);
-    const cardPadding = 12;
+    const cardPadding = 10;
     const cardHeight = contentHeight + cardPadding * 2;
-    ensureSpace(cardHeight + 12);
+    ensureSpace(cardHeight + 10);
 
     const cardTop = currentY;
     const cardBottom = cardTop - cardHeight;
@@ -238,7 +242,7 @@ const buildCatalogPdfBuffer = async (params: CatalogPdfParams) => {
       color: softBg,
       borderColor: border,
       borderWidth: 1,
-      opacity: 0.95,
+      opacity: 0.98,
     });
 
     const baseY = cardTop - cardPadding;
@@ -260,34 +264,33 @@ const buildCatalogPdfBuffer = async (params: CatalogPdfParams) => {
         y: textY,
         size: 14,
         font: titleFont,
-        color: rgb(0.1, 0.1, 0.1),
+        color: textColor,
       });
       textY -= 14;
     });
 
-    // Price pill
-    const priceWidth = Math.min(
-      textWidth,
-      Math.max(60, bodyFont.widthOfTextAtSize(priceLabel, 11) + 16)
-    );
+    // Price to the right
+    const priceWidth = Math.max(60, bodyFont.widthOfTextAtSize(priceLabel, 11) + 10);
+    const priceX = margin + usableWidth - priceWidth - 12;
+    const priceY = baseY - 2;
     currentPage.drawRectangle({
-      x: textX,
-      y: textY - 4,
-      width: priceWidth,
+      x: priceX,
+      y: priceY - 14,
+      width: priceWidth + 6,
       height: 18,
-      color: accent,
+      color: rgb(1, 1, 1),
       borderColor: accent,
       borderWidth: 1,
-      opacity: 0.9,
+      opacity: 0.95,
     });
     currentPage.drawText(priceLabel, {
-      x: textX + 8,
-      y: textY - 1,
+      x: priceX + 4,
+      y: priceY - 2,
       size: 11,
       font: titleFont,
-      color: rgb(1, 1, 1),
+      color: accent,
     });
-    textY -= 24;
+    textY = priceY - 18;
 
     descLines.forEach((line) => {
       currentPage.drawText(line, {
@@ -295,12 +298,12 @@ const buildCatalogPdfBuffer = async (params: CatalogPdfParams) => {
         y: textY,
         size: 11,
         font: bodyFont,
-        color: rgb(0.2, 0.2, 0.2),
+        color: muted,
       });
       textY -= 13;
     });
 
-    currentY = cardBottom - 10;
+    currentY = cardBottom - 8;
   };
 
   for (const product of params.products) {
