@@ -54,6 +54,19 @@ function matchProductName(query, products) {
         const nameTokens = tokenizeProductQuery(product.name);
         const nameNoSpace = nameNorm.replace(/\s+/g, "");
         const aliases = buildProductAliases(nameNorm, nameNoSpace);
+        const keywords = [];
+        if (Array.isArray(product.categories)) {
+            keywords.push(...product.categories.map((c) => normalizeText(String(c))));
+        }
+        if (Array.isArray(product.tags)) {
+            keywords.push(...product.tags.map((t) => normalizeText(String(t.label || t))));
+        }
+        if (Array.isArray(product.tagLabels)) {
+            keywords.push(...product.tagLabels.map((t) => normalizeText(String(t))));
+        }
+        if (product.description) {
+            keywords.push(...tokenizeProductQuery(String(product.description)));
+        }
         let score = 0;
         if (nameNorm.includes(queryNorm) || queryNorm.includes(nameNorm)) {
             score += 3;
@@ -64,7 +77,7 @@ function matchProductName(query, products) {
         for (const token of queryTokens) {
             if (!token)
                 continue;
-            if (nameTokens.includes(token) || nameNorm.includes(token)) {
+            if (nameTokens.includes(token) || nameNorm.includes(token) || keywords.includes(token)) {
                 score += 1;
             }
         }
