@@ -60,6 +60,7 @@ Reglas de comportamiento:
 - Si te preguntan dirección/depósito/local: respondé la dirección directo y ofrecé ubicación. NO preguntes ‘¿querés que te confirme la dirección?.
 - Si el cliente dice ‘eh?/qué?/cómo?/what/como?/que decis/el que/queee/quee?no entiendo’: re-explicá lo último, NO cambies de tema a pedidos.
 - No canceles pedidos ante mensajes ambiguos tipo “olvidalo”, “dejalo”, “no”, a menos que explícitamente pidan cancelar. Si no queda claro, pedí confirmación o seguí con la última consigna pendiente.
+- Antes de decir que no hay un producto, buscá por categorías/etiquetas/descripcion además del nombre. Si el término aparece en tags/categorías/descripcion de algún producto, ofrecelos como opción en vez de decir que no hay.
 
 Precios / promos:
 - Si preguntan precio de un producto y está en el catálogo/contexto, respondé con el precio.
@@ -337,6 +338,7 @@ function formatCatalogForPrompt(catalog: any): string {
           : Array.isArray(p.tagLabels) && p.tagLabels.length
           ? p.tagLabels
           : [];
+      const desc = p.description ? truncate(String(p.description)) : "";
 
       categories.forEach((c: any) => {
         if (typeof c === "string" && c.trim()) categorySet.add(c.trim());
@@ -348,11 +350,16 @@ function formatCatalogForPrompt(catalog: any): string {
       const extras: string[] = [];
       if (categories.length) extras.push(`cat: ${categories.join("/")}`);
       if (tags.length) extras.push(`tags: ${tags.join("/")}`);
-      if (p.description) extras.push(`desc: ${truncate(String(p.description))}`);
+      if (desc) extras.push(`desc: ${desc}`);
+      const keywords: string[] = [];
+      keywords.push(name);
+      if (categories.length) keywords.push(...categories);
+      if (tags.length) keywords.push(...tags);
+      if (desc) keywords.push(desc);
 
       const extrasText = extras.length ? ` · ${extras.join(" · ")}` : "";
 
-      return `- ${String(name)}${unit ? ` (${unit})` : ""}: ${priceText}${extrasText}`;
+      return `- ${String(name)}${unit ? ` (${unit})` : ""}: ${priceText}${extrasText}` + (keywords.length ? ` | keywords: ${keywords.join(" / ")}` : "");
     });
 
     const catLine =

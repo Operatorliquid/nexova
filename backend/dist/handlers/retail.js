@@ -1096,8 +1096,27 @@ async function handleRetailAgentAction(params) {
         return appearsInMessage(candidate, rawText);
     });
     if (!items || items.length === 0) {
-        await sendMessage("Decime productos y cantidades, ej: 2 coca, 3 galletitas.");
-        return true;
+        // Fallback rápido: leer patrones "n producto" del mensaje (ej: "quiero 5 cocas")
+        const fallbackItems = [];
+        const tokens = norm(rawText || "");
+        const matches = Array.from(tokens.matchAll(/\b(\d+)\s+([a-z0-9][a-z0-9\s]{1,40})/gi)).slice(0, 5);
+        for (const m of matches) {
+            const qty = Number(m[1]);
+            const candidateName = (m[2] || "").trim();
+            if (qty > 0 && candidateName) {
+                fallbackItems.push({ name: candidateName, quantity: qty });
+            }
+        }
+        if (fallbackItems.length === 0) {
+            await sendMessage("Decime productos y cantidades, ej: 2 coca, 3 galletitas.");
+            return true;
+        }
+        items = fallbackItems.map((it) => ({
+            name: it.name,
+            normalizedName: it.name,
+            quantity: it.quantity,
+            op: "add",
+        }));
     }
     const normalized = items
         .map((it) => {
@@ -1108,7 +1127,7 @@ async function handleRetailAgentAction(params) {
         return {
             name: name.toLowerCase(),
             normalizedName: normalizedName.toLowerCase(),
-            quantity: Number(it.quantity) || 0,
+            quantity: Math.max(0, Number(it.quantity) || 0),
             op: typeof it.op === "string" ? it.op : undefined,
         };
     })
