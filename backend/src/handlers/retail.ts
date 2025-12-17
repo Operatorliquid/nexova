@@ -215,6 +215,22 @@ const isTransferMention = (raw: string) => {
   );
 };
 
+const shouldSkipProofRequest = (doctorId: number, clientId: number) => {
+  const key = `${doctorId}:${clientId}`;
+  const ts = proofRequestCooldown.get(key);
+  if (!ts) return false;
+  const elapsed = Date.now() - ts;
+  if (elapsed > 15 * 60 * 1000) {
+    proofRequestCooldown.delete(key);
+    return false;
+  }
+  return true;
+};
+
+const markProofRequestCooldown = (doctorId: number, clientId: number) => {
+  proofRequestCooldown.set(`${doctorId}:${clientId}`, Date.now());
+};
+
 const wantsCatalog = (raw: string) => {
   const t = normLite(raw || "");
   if (!t) return false;
@@ -320,6 +336,7 @@ const clearAwaitingRemoveProduct = (doctorId: number, clientId: number) => {
 
 // Estado en memoria para "estoy esperando #pedido para asignar comprobante"
 const awaitingProofMap = new Map<string, number>();
+const proofRequestCooldown = new Map<string, number>();
 
 export async function assignLatestUnassignedProofToOrder(params: {
   doctorId: number;
@@ -1019,40 +1036,46 @@ if (awaitingRemove) {
 
   // ✅ Declaración de transferencia sin comprobante: pedimos el comprobante si no hubo uno reciente
   if (isTransferMention(msgText)) {
-    const recentProof = await prisma.paymentProof.findFirst({
-      where: { doctorId: doctor.id, clientId: client.id },
-      orderBy: { createdAt: "desc" },
-      select: { id: true, createdAt: true, orderId: true },
-    });
-    const recentWindowMs = 15 * 60 * 1000;
-    const now = Date.now();
-    const hasRecent =
-      recentProof?.createdAt && now - new Date(recentProof.createdAt).getTime() <= recentWindowMs;
-
-    if (!hasRecent) {
-      await sendMessage(
-        "¡Genial! ¿Me pasás el comprobante o captura de la transferencia así lo asigno al pedido?"
-      );
-      return true;
-    }
-
-    if (recentProof.orderId) {
-      const ord = await prisma.order.findUnique({
-        where: { id: recentProof.orderId },
-        select: { sequenceNumber: true },
+    if (shouldSkipProofRequest(doctor.id, client.id)) {
+      // Ya preguntamos hace poco; seguimos con el flujo normal para no encajonar la conversación
+    } else {
+      const recentProof = await prisma.paymentProof.findFirst({
+        where: { doctorId: doctor.id, clientId: client.id },
+        orderBy: { createdAt: "desc" },
+        select: { id: true, createdAt: true, orderId: true },
       });
-      await sendMessage(
-        ord?.sequenceNumber
-          ? `Ya tengo tu comprobante y lo vinculé al pedido #${ord.sequenceNumber}. ¿Querés revisar algo más?`
-          : "Ya tengo tu comprobante registrado. ¿Querés que lo vincule a algún pedido?"
-      );
+      const recentWindowMs = 15 * 60 * 1000;
+      const now = Date.now();
+      const hasRecent =
+        recentProof?.createdAt && now - new Date(recentProof.createdAt).getTime() <= recentWindowMs;
+
+      if (!hasRecent) {
+        markProofRequestCooldown(doctor.id, client.id);
+        await sendMessage(
+          "¡Genial! ¿Me pasás el comprobante o captura de la transferencia así lo asigno al pedido?"
+        );
+        return true;
+      }
+
+      if (recentProof.orderId) {
+        const ord = await prisma.order.findUnique({
+          where: { id: recentProof.orderId },
+          select: { sequenceNumber: true },
+        });
+        await sendMessage(
+          ord?.sequenceNumber
+            ? `Ya tengo tu comprobante y lo vinculé al pedido #${ord.sequenceNumber}. ¿Querés revisar algo más?`
+            : "Ya tengo tu comprobante registrado. ¿Querés que lo vincule a algún pedido?"
+        );
+        return true;
+      }
+
+      // Hay comprobante reciente pero sin pedido asignado: pedir solo el número
+      markProofRequestCooldown(doctor.id, client.id);
+      await setAwaitingProofOrderNumber({ doctorId: doctor.id, clientId: client.id });
+      await sendMessage("Ya tengo tu comprobante 👍 ¿Para qué pedido es? Mandame el número (ej: 5).");
       return true;
     }
-
-    // Hay comprobante reciente pero sin pedido asignado: pedir solo el número
-    await setAwaitingProofOrderNumber({ doctorId: doctor.id, clientId: client.id });
-    await sendMessage("Ya tengo tu comprobante 👍 ¿Para qué pedido es? Mandame el número (ej: 5).");
-    return true;
   }
 
   // ✅ Asignación de comprobantes (intercepta antes de confirmar pedido)
