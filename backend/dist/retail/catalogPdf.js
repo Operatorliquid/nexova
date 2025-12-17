@@ -89,6 +89,9 @@ const buildCatalogPdfBuffer = async (params) => {
     const usableWidth = pageWidth - margin * 2;
     const titleFont = await doc.embedFont(pdf_lib_1.StandardFonts.HelveticaBold);
     const bodyFont = await doc.embedFont(pdf_lib_1.StandardFonts.Helvetica);
+    const accent = (0, pdf_lib_1.rgb)(0.09, 0.57, 0.49);
+    const softBg = (0, pdf_lib_1.rgb)(0.96, 0.98, 0.99);
+    const border = (0, pdf_lib_1.rgb)(0.82, 0.88, 0.9);
     let currentPage = page;
     let currentY = pageHeight - margin;
     const imageCache = new Map();
@@ -107,62 +110,62 @@ const buildCatalogPdfBuffer = async (params) => {
     const logoImage = await getImage(params.logoUrl || null);
     let logoHeight = 0;
     let logoWidth = 0;
-    if (logoImage) {
-        const maxLogoWidth = 140;
-        const scale = Math.min(1, maxLogoWidth / logoImage.width);
-        logoWidth = logoImage.width * scale;
-        logoHeight = logoImage.height * scale;
-        currentPage.drawImage(logoImage, {
-            x: pageWidth - margin - logoWidth,
-            y: currentY - logoHeight + 8,
-            width: logoWidth,
-            height: logoHeight,
+    const drawHeader = () => {
+        currentPage.drawRectangle({
+            x: 0,
+            y: pageHeight - 120,
+            width: pageWidth,
+            height: 120,
+            color: softBg,
         });
-    }
-    currentPage.drawText("Catálogo de productos", {
-        x: margin,
-        y: currentY,
-        size: 18,
-        font: titleFont,
-        color: (0, pdf_lib_1.rgb)(0.1, 0.1, 0.1),
-    });
-    currentY -= 22;
-    currentPage.drawText(params.doctorName, {
-        x: margin,
-        y: currentY,
-        size: 12,
-        font: bodyFont,
-    });
-    currentY -= 14;
-    currentPage.drawText(`Fecha: ${formatDate(generatedAt)}`, {
-        x: margin,
-        y: currentY,
-        size: 11,
-        font: bodyFont,
-        color: (0, pdf_lib_1.rgb)(0.25, 0.25, 0.25),
-    });
-    const headerBottom = Math.min(currentY - 18, currentY - logoHeight - 6);
-    currentY = headerBottom;
+        if (logoImage) {
+            const maxLogoWidth = 130;
+            const scale = Math.min(1, maxLogoWidth / logoImage.width);
+            logoWidth = logoImage.width * scale;
+            logoHeight = logoImage.height * scale;
+            currentPage.drawImage(logoImage, {
+                x: pageWidth - margin - logoWidth,
+                y: pageHeight - 110,
+                width: logoWidth,
+                height: logoHeight,
+            });
+        }
+        currentPage.drawText("Catálogo de productos", {
+            x: margin,
+            y: pageHeight - 60,
+            size: 20,
+            font: titleFont,
+            color: (0, pdf_lib_1.rgb)(0.08, 0.1, 0.12),
+        });
+        currentPage.drawText(params.doctorName, {
+            x: margin,
+            y: pageHeight - 78,
+            size: 12,
+            font: bodyFont,
+            color: (0, pdf_lib_1.rgb)(0.15, 0.2, 0.25),
+        });
+        currentPage.drawText(`Actualizado: ${formatDate(generatedAt)}`, {
+            x: margin,
+            y: pageHeight - 94,
+            size: 11,
+            font: bodyFont,
+            color: (0, pdf_lib_1.rgb)(0.28, 0.32, 0.35),
+        });
+        currentPage.drawRectangle({
+            x: margin,
+            y: pageHeight - 110,
+            width: pageWidth - margin * 2,
+            height: 4,
+            color: accent,
+        });
+        currentY = pageHeight - 130;
+    };
+    drawHeader();
     const addPage = () => {
         currentPage = doc.addPage();
         const { height } = currentPage.getSize();
         currentY = height - margin;
-        currentPage.drawText("Catálogo de productos", {
-            x: margin,
-            y: currentY,
-            size: 14,
-            font: titleFont,
-            color: (0, pdf_lib_1.rgb)(0.1, 0.1, 0.1),
-        });
-        currentY -= 16;
-        currentPage.drawText(`Fecha: ${formatDate(generatedAt)}`, {
-            x: margin,
-            y: currentY,
-            size: 11,
-            font: bodyFont,
-            color: (0, pdf_lib_1.rgb)(0.25, 0.25, 0.25),
-        });
-        currentY -= 16;
+        drawHeader();
     };
     const ensureSpace = (needed) => {
         if (currentY - needed < margin) {
@@ -180,17 +183,31 @@ const buildCatalogPdfBuffer = async (params) => {
         const textX = margin + (hasImage ? imgWidth + 12 : 0);
         const textWidth = usableWidth - (textX - margin);
         const priceLabel = formatCurrency((_a = product.price) !== null && _a !== void 0 ? _a : null);
-        const titleLines = wrapText(`${product.name} — ${priceLabel}`, titleFont, 12, textWidth);
+        const titleLines = wrapText(product.name, titleFont, 14, textWidth);
         const desc = (product.description || "").trim();
         const descLines = desc ? wrapText(desc, bodyFont, 11, textWidth) : [];
-        const blockHeight = Math.max(titleLines.length * 14 + (descLines.length ? descLines.length * 13 + 4 : 0), imgHeight || 0) +
-            6;
-        ensureSpace(blockHeight);
-        const baseY = currentY;
+        const textContentHeight = titleLines.length * 15 + 18 + (descLines.length ? descLines.length * 13 + 6 : 0);
+        const contentHeight = Math.max(textContentHeight, imgHeight || 0);
+        const cardPadding = 12;
+        const cardHeight = contentHeight + cardPadding * 2;
+        ensureSpace(cardHeight + 12);
+        const cardTop = currentY;
+        const cardBottom = cardTop - cardHeight;
+        currentPage.drawRectangle({
+            x: margin,
+            y: cardBottom,
+            width: usableWidth,
+            height: cardHeight,
+            color: softBg,
+            borderColor: border,
+            borderWidth: 1,
+            opacity: 0.95,
+        });
+        const baseY = cardTop - cardPadding;
         if (hasImage) {
             const imgY = baseY - imgHeight + 2;
             currentPage.drawImage(embeddedImage, {
-                x: margin,
+                x: margin + cardPadding - 2,
                 y: imgY,
                 width: imgWidth,
                 height: imgHeight,
@@ -201,12 +218,32 @@ const buildCatalogPdfBuffer = async (params) => {
             currentPage.drawText(line, {
                 x: textX,
                 y: textY,
-                size: 12,
+                size: 14,
                 font: titleFont,
                 color: (0, pdf_lib_1.rgb)(0.1, 0.1, 0.1),
             });
             textY -= 14;
         });
+        // Price pill
+        const priceWidth = Math.min(textWidth, Math.max(60, bodyFont.widthOfTextAtSize(priceLabel, 11) + 16));
+        currentPage.drawRectangle({
+            x: textX,
+            y: textY - 4,
+            width: priceWidth,
+            height: 18,
+            color: accent,
+            borderColor: accent,
+            borderWidth: 1,
+            opacity: 0.9,
+        });
+        currentPage.drawText(priceLabel, {
+            x: textX + 8,
+            y: textY - 1,
+            size: 11,
+            font: titleFont,
+            color: (0, pdf_lib_1.rgb)(1, 1, 1),
+        });
+        textY -= 24;
         descLines.forEach((line) => {
             currentPage.drawText(line, {
                 x: textX,
@@ -217,7 +254,7 @@ const buildCatalogPdfBuffer = async (params) => {
             });
             textY -= 13;
         });
-        currentY = baseY - blockHeight;
+        currentY = cardBottom - 10;
     };
     for (const product of params.products) {
         // eslint-disable-next-line no-await-in-loop
