@@ -33,12 +33,14 @@ const DOCTOR_UPLOADS_DIR = path_1.default.join(UPLOADS_DIR, "doctors");
 const PRODUCT_UPLOADS_DIR = path_1.default.join(UPLOADS_DIR, "products");
 const ORDER_UPLOADS_DIR = path_1.default.join(UPLOADS_DIR, "orders");
 const PROMOTION_UPLOADS_DIR = path_1.default.join(UPLOADS_DIR, "promotions");
+const CATALOG_UPLOADS_DIR = path_1.default.join(UPLOADS_DIR, "catalogs");
 const fsp = fs_1.default.promises;
 ensureDirectory(UPLOADS_DIR);
 ensureDirectory(DOCTOR_UPLOADS_DIR);
 ensureDirectory(PRODUCT_UPLOADS_DIR);
 ensureDirectory(ORDER_UPLOADS_DIR);
 ensureDirectory(PROMOTION_UPLOADS_DIR);
+ensureDirectory(CATALOG_UPLOADS_DIR);
 const PORT = process.env.PORT || 4000;
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY || null;
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || "";
@@ -2956,6 +2958,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                 whatsappBusinessNumber: true,
                 availabilityStatus: true,
                 businessAlias: true,
+                ticketLogoUrl: true,
             },
         });
         if (!doctor) {
@@ -3054,7 +3057,11 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                             const savedFile = await saveOrderAttachmentBuffer(buffer, media.contentType || "application/octet-stream", media.mediaSid || "Comprobante");
                             const fileUrl = savedFile.url;
                             const duplicateExact = await prisma_1.prisma.paymentProof.findFirst({
-                                where: { doctorId: doctor.id, bytesSha256: hash },
+                                where: {
+                                    doctorId: doctor.id,
+                                    clientId: retailClient.id, // ✅ clave: no mezclar clientes
+                                    bytesSha256: hash,
+                                },
                                 orderBy: { createdAt: "desc" },
                             });
                             let duplicateOfId = (_c = duplicateExact === null || duplicateExact === void 0 ? void 0 : duplicateExact.id) !== null && _c !== void 0 ? _c : null;
@@ -3062,6 +3069,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                                 const candidates = await prisma_1.prisma.paymentProof.findMany({
                                     where: {
                                         doctorId: doctor.id,
+                                        clientId: retailClient.id, // ✅ clave: no mezclar clientes
                                         imageDhash: { not: null },
                                     },
                                     select: { id: true, imageDhash: true },
@@ -3111,7 +3119,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
                                     currency: (_e = extraction === null || extraction === void 0 ? void 0 : extraction.currency) !== null && _e !== void 0 ? _e : null,
                                     reference: (_f = extraction === null || extraction === void 0 ? void 0 : extraction.reference) !== null && _f !== void 0 ? _f : null,
                                     proofDate,
-                                    status: duplicateOfId ? "duplicate" : "unassigned",
+                                    status: "unassigned",
                                     duplicateOfId: duplicateOfId !== null && duplicateOfId !== void 0 ? duplicateOfId : undefined,
                                 },
                             });

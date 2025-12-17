@@ -67,12 +67,14 @@ const DOCTOR_UPLOADS_DIR = path.join(UPLOADS_DIR, "doctors");
 const PRODUCT_UPLOADS_DIR = path.join(UPLOADS_DIR, "products");
 const ORDER_UPLOADS_DIR = path.join(UPLOADS_DIR, "orders");
 const PROMOTION_UPLOADS_DIR = path.join(UPLOADS_DIR, "promotions");
+const CATALOG_UPLOADS_DIR = path.join(UPLOADS_DIR, "catalogs");
 const fsp = fs.promises;
 ensureDirectory(UPLOADS_DIR);
 ensureDirectory(DOCTOR_UPLOADS_DIR);
 ensureDirectory(PRODUCT_UPLOADS_DIR);
 ensureDirectory(ORDER_UPLOADS_DIR);
 ensureDirectory(PROMOTION_UPLOADS_DIR);
+ensureDirectory(CATALOG_UPLOADS_DIR);
 
 const PORT = process.env.PORT || 4000;
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY || null;
@@ -3760,6 +3762,7 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
           whatsappBusinessNumber: true,
           availabilityStatus: true,
           businessAlias: true,
+          ticketLogoUrl: true,
         },
     });
 

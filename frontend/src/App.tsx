@@ -13311,11 +13311,17 @@ return (
                                           type="button"
                                           className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${
                                             ord.paymentStatus === "unpaid"
-                                              ? "bg-rose-50 text-rose-700 border-rose-200"
+                                              ? "btn-dng"
                                               : "bg-white text-slate-700 border-slate-200 hover:border-slate-300"
-                                          } ${paymentDraft.adding ? "opacity-60 cursor-not-allowed" : ""}`}
+                                          } ${
+                                            orderUpdatingId === ord.id
+                                              ? "opacity-60 cursor-not-allowed"
+                                              : paymentDraft.adding
+                                              ? "opacity-60"
+                                              : ""
+                                          }`}
                                           onClick={() => handleMarkOrderUnpaid(ord)}
-                                          disabled={paymentDraft.adding || orderUpdatingId === ord.id}
+                                          disabled={orderUpdatingId === ord.id}
                                         >
                                           Pedido no pagado
                                         </button>

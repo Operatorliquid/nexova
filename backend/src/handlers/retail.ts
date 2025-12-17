@@ -3,6 +3,7 @@ import { sendWhatsAppText } from "../whatsapp";
 import { appendMenuHintForBusiness } from "../utils/hints";
 import { matchProductName, upsertRetailOrder } from "../utils/retail";
 import { normalizeDniInput } from "../utils/text";
+import { createCatalogPdf } from "../retail/catalogPdf";
 import { PaymentProofStatus, type Patient, type RetailClient } from "@prisma/client";
 
 const norm = (s: string) =>
@@ -197,6 +198,16 @@ const isYes = (txt: string) => {
   return /^(si+|sisi+|ok(ey|a|ay)?|dale+|listo+|confirm(o|ar)?|de una|deuna|obvio|joya|perfecto|genial|barbaro|buenisimo)$/.test(
     t
   );
+};
+
+const wantsCatalog = (raw: string) => {
+  const t = normLite(raw || "");
+  if (!t) return false;
+  if (/\bcat(a|á)logo\b/.test(t)) return true;
+  if (/\blista\s+de\s+precios\b/.test(t)) return true;
+  if (/\blista\s+de\s+productos\b/.test(t)) return true;
+  if (/\bprecios?\s+(de\s+)?(todo|todos|toda|productos|articulos)\b/.test(t)) return true;
+  return false;
 };
 
 const isNo = (txt: string) => {
@@ -515,6 +526,69 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
 
   await maybeUpdateProfile();
 
+  const askedForCatalog = wantsCatalog(rawText || "");
+  if (askedForCatalog) {
+    if (!products.length) {
+      await sendMessage("Todavía no tengo cargado el catálogo para compartir 📄.");
+      return true;
+    }
+
+    let logoUrl: string | null | undefined = (doctor as any).ticketLogoUrl;
+    if (logoUrl === undefined) {
+      const doctorLogo = await prisma.doctor.findUnique({
+        where: { id: doctor.id },
+        select: { ticketLogoUrl: true },
+      });
+      logoUrl = doctorLogo?.ticketLogoUrl ?? null;
+    }
+
+    try {
+      const catalog = await createCatalogPdf({
+        doctorId: doctor.id,
+        doctorName: doctor.name || "Catálogo",
+        products: products.map((p) => ({
+          name: p.name,
+          price: p.price,
+          description: p.description || undefined,
+        })),
+        logoUrl: logoUrl || null,
+        generatedAt: new Date(),
+      });
+
+      if (!catalog.publicUrl) {
+        await sendMessage("No pude generar el PDF del catálogo ahora mismo. Probemos de nuevo en un rato.");
+        return true;
+      }
+
+      const reply =
+        "Te paso el catálogo en PDF con precios y detalles. Contame qué querés pedir 👌";
+      const messageWithHint = appendMenuHintForBusiness(reply, doctor.businessType as any);
+      const waResult = await sendWhatsAppText(
+        phoneE164,
+        messageWithHint,
+        doctorWhatsappConfig,
+        catalog.publicUrl
+      );
+      await prisma.message.create({
+        data: {
+          waMessageId: (waResult as any)?.sid ?? null,
+          from: doctorNumber,
+          to: phoneE164,
+          direction: "outgoing",
+          type: "other",
+          body: reply,
+          rawPayload: waResult,
+          retailClientId: client.id,
+          doctorId: doctor.id,
+        },
+      });
+    } catch (error) {
+      console.error("[RetailAgent] Error generando catálogo PDF:", error);
+      await sendMessage("No pude generar el catálogo ahora mismo. Avisame y te lo reenvío.");
+    }
+    return true;
+  }
+
   // Si es un cliente nuevo y no tenemos datos mínimos, pedimos DNI y dirección antes de seguir
   if (!client.dni || !client.businessAddress) {
     const missing: string[] = [];
@@ -557,6 +631,10 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
 const removeIncoming = norm(rawText || "");
 
 const isRemoveIntent = /\b(quit(ar|ame|a)?|quitar|sac(ar|ame|a)?|sacar|elimin(ar|ame|a)?|borra(r|me)?|borrame|borrar|sin)\b/i.test(
+  removeIncoming
+);
+
+const hasOtherModifyIntent = /\b(sum(ar|ame|a)?|agreg(ar|ame|a|alas)?|anad(ir|ime|i)?|añad(ir|ime|i)?|mas|\+|cambi(a|ame|a)?|reemplaz(a|ame|a)?)\b/i.test(
   removeIncoming
 );
 
@@ -1259,10 +1337,12 @@ if (awaitingRemove) {
     const qty = Math.max(0, Math.trunc((it as any).quantity || 0));
     const prev = currentQuantities.get(it.productId) ?? 0;
 
-    if (op === "remove") {
-      currentQuantities.set(it.productId, 0);
-      continue;
-    }
+  if (op === "remove") {
+  // ✅ si vino cantidad (ej: “quitame 2”), restamos; si vino 0, borramos todo
+  const next = qty > 0 ? Math.max(0, prev - qty) : 0;
+  currentQuantities.set(it.productId, next);
+  continue;
+}
     if (op === "set") {
       currentQuantities.set(it.productId, qty);
       continue;

@@ -205,6 +205,18 @@ body {
   border-radius: 999px;
 }
 
+.btn-dng{
+  background-color:red;
+  color:white;
+  transition: .3s all;
+  border:0px;
+}
+
+.btn-dng:hover{
+  background-color: rgb(144, 0, 0);
+  color:white;
+}
+
 .btn-outline:hover:not(:disabled) {
   border-color: rgba(104, 175, 221, 0.65);
   color: #eaf9ff;
