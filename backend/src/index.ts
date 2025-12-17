@@ -1507,6 +1507,58 @@ function getDoctorBusinessNumber(doctor: {
   );
 }
 
+const normLite = (s: string) =>
+  (s || "")
+    .toLowerCase()
+    .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ");
+
+const isTransferMention = (raw: string) => {
+  const t = normLite(raw || "");
+  if (!t) return false;
+  return (
+    /\btransfe/.test(t) ||
+    /\btransferenc/.test(t) ||
+    /\btransfier/.test(t) ||
+    /\btransferi\b/.test(t) ||
+    /\btransfiri/.test(t) ||
+    /\bpague\b|\bpago\b|\bte pague\b|\bpagado\b/.test(t) ||
+    /\bdeposit/.test(t) ||
+    /\bte (mande|mandee|pase|envie|gire) (la\s*)?plata/.test(t)
+  );
+};
+
+const isStopProofText = (txt: string) => {
+  const t = normLite(txt || "");
+  return (
+    /\bolvid/.test(t) ||
+    /\bdejalo\b/.test(t) ||
+    /\bdespues\b|\bdesp\b/.test(t) ||
+    /\bmas\s+tarde\b/.test(t) ||
+    /\bno puedo\b/.test(t) ||
+    /\bno lo tengo\b/.test(t)
+  );
+};
+
+const transferPromptCooldown = new Map<string, number>();
+const shouldSkipProofRequest = (doctorId: number, clientId: number) => {
+  const key = `${doctorId}:${clientId}`;
+  const ts = transferPromptCooldown.get(key);
+  if (!ts) return false;
+  const elapsed = Date.now() - ts;
+  if (elapsed > 15 * 60 * 1000) {
+    transferPromptCooldown.delete(key);
+    return false;
+  }
+  return true;
+};
+
+const markProofRequestCooldown = (doctorId: number, clientId: number) => {
+  transferPromptCooldown.set(`${doctorId}:${clientId}`, Date.now());
+};
+
 function formatE164(value?: string | null) {
   if (!value) return null;
   let cleaned = value.toString().trim();
@@ -3835,6 +3887,92 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
         status: o.status,
         items: o.items.map((it) => ({ name: it.product?.name || "Producto", quantity: it.quantity })),
       }));
+
+      // Guard: pedidos de transferencia sin comprobante (antes de pasar al agente)
+      const lastOutgoing = await prisma.message.findFirst({
+        where: { retailClientId: retailClient.id, doctorId: doctor.id, direction: "outgoing" },
+        orderBy: { createdAt: "desc" },
+        select: { body: true },
+      });
+
+      const lastBotAskedProof = /comprobante|captura de la transferencia|mand[aá] el comprobante/i.test(
+        lastOutgoing?.body || ""
+      );
+
+      if (lastBotAskedProof && isStopProofText(bodyText)) {
+        const reply =
+          "Listo, no tomo el pago. Cuando tengas el comprobante, mandalo y lo asigno al pedido.";
+        const waResult = await sendWhatsAppText(phoneE164, reply, doctorWhatsappConfig);
+        await prisma.message.create({
+          data: {
+            waMessageId: (waResult as any)?.sid ?? null,
+            from: doctorNumber,
+            to: phoneE164,
+            direction: "outgoing",
+            type: "text",
+            body: reply,
+            rawPayload: waResult,
+            retailClientId: retailClient.id,
+            doctorId: doctor.id,
+          },
+        });
+        markProofRequestCooldown(doctor.id, retailClient.id);
+        return res.sendStatus(200);
+      }
+
+      const wantsTransfer = isTransferMention(bodyText);
+      const hasMediaProof = numMedia > 0;
+
+      if (wantsTransfer && !hasMediaProof) {
+        const pending = pendingOrdersForCtx[0] || null;
+        const itemsText =
+          pending?.items?.length && pending.items.length <= 3
+            ? pending.items.map((it) => `${it.quantity}x ${it.product?.name || "Producto"}`).join(", ")
+            : null;
+        const orderPart = pending?.sequenceNumber
+          ? ` para el pedido #${pending.sequenceNumber}${itemsText ? ` (${itemsText})` : ""}`
+          : "";
+
+        const hint = pending?.sequenceNumber
+          ? `Cuando puedas, mandá el comprobante y lo asigno al pedido #${pending.sequenceNumber}.`
+          : "Cuando puedas, mandá el comprobante y lo asigno al pedido.";
+
+        if (shouldSkipProofRequest(doctor.id, retailClient.id)) {
+          const waResult = await sendWhatsAppText(phoneE164, hint, doctorWhatsappConfig);
+          await prisma.message.create({
+            data: {
+              waMessageId: (waResult as any)?.sid ?? null,
+              from: doctorNumber,
+              to: phoneE164,
+              direction: "outgoing",
+              type: "text",
+              body: hint,
+              rawPayload: waResult,
+              retailClientId: retailClient.id,
+              doctorId: doctor.id,
+            },
+          });
+          return res.sendStatus(200);
+        }
+
+        const reply = `¡Genial! ¿Me pasás el comprobante o captura de la transferencia${orderPart} así lo asigno?`;
+        const waResult = await sendWhatsAppText(phoneE164, reply, doctorWhatsappConfig);
+        await prisma.message.create({
+          data: {
+            waMessageId: (waResult as any)?.sid ?? null,
+            from: doctorNumber,
+            to: phoneE164,
+            direction: "outgoing",
+            type: "text",
+            body: reply,
+            rawPayload: waResult,
+            retailClientId: retailClient.id,
+            doctorId: doctor.id,
+          },
+        });
+        markProofRequestCooldown(doctor.id, retailClient.id);
+        return res.sendStatus(200);
+      }
 
       console.log(
         "[RETAIL] pendingOrders:",

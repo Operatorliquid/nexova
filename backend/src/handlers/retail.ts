@@ -206,14 +206,12 @@ const isTransferMention = (raw: string) => {
   return (
     /\btransfe/.test(t) ||
     /\btransferenc/.test(t) ||
+    /\btransfier/.test(t) || // transfiero, transfieren
+    /\btransferi\b/.test(t) ||
     /\btransfiri/.test(t) ||
     /\bpague\b|\bpago\b|\bte pague\b|\bpagado\b/.test(t) ||
-    // "deposito" es ambiguo (puede ser "depósito" = lugar).
-    // Lo mantenemos, pero evitamos el bucle con un handler de "ubicación" antes.
     /\bdeposit/.test(t) ||
-    /\bte (mande|mande|pase|envie) la plata/.test(t) ||
-    /\bte gire/.test(t) ||
-    /\btransferi\b/.test(t)
+    /\bte (mande|mandee|pase|envie|gire) (la\s*)?plata/.test(t)
   );
 };
 
@@ -256,34 +254,26 @@ const isNo = (txt: string) => {
 // ✅ “eh?/que?/no entiendo” (respuesta de confusión)
 const isConfusion = (txt: string) => {
   const t = norm(txt);
+  return /^(eh+|e+|que|ke|como|no entendi|no entiendo)$/.test(t) || t.length === 0;
+};
+
+const isStopProofText = (txt: string) => {
+  const t = normLite(txt || "");
   return (
-    /^(eh+|e+|que|ke|como|no entendi|no entiendo|wtf|what|q onda|que onda|que decis|que deci|no se)$/.test(
-      t
-    ) ||
-    t.length === 0
+    /\bolvid/.test(t) ||
+    /\bdejalo\b/.test(t) ||
+    /\bdespues\b|\bdesp\b/.test(t) ||
+    /\bmas\s+tarde\b/.test(t) ||
+    /\bno puedo\b/.test(t) ||
+    /\bno lo tengo\b/.test(t)
   );
 };
 
 const firstSentence = (s: string) => {
   if (!s) return "";
-  const txt = String(s).trim().replace(/\s+/g, " ");
-
-  // Si hay pregunta en español (¿ ... ?), devolvemos la pregunta completa.
-  const iStart = txt.indexOf("¿");
-  if (iStart >= 0) {
-    const iEnd = txt.indexOf("?", iStart);
-    if (iEnd > iStart) return txt.slice(iStart, Math.min(iEnd + 1, iStart + 220)).trim();
-    return txt.slice(iStart, iStart + 220).trim();
-  }
-
-  const q = txt.indexOf("?");
-  if (q >= 0) return txt.slice(0, Math.min(q + 1, 220)).trim();
-
-  const nl = txt.indexOf("\n");
-  const dot = txt.indexOf(".");
-  const cutCandidates = [nl, dot].filter((x) => x >= 0);
-  const cut = cutCandidates.length ? Math.min(...cutCandidates) : Math.min(220, txt.length);
-  return txt.slice(0, cut).trim();
+  const i = s.search(/[¿?]/);
+  const cut = i > 0 ? s.slice(0, i) : s;
+  return cut.trim();
 };
 
 // ✅ FIX: Detecta si el último mensaje del bot ofrecía promo o preguntaba cancelar
@@ -306,50 +296,6 @@ function asksPaymentMethod(raw: string) {
     /(como|cómo)\s*(te\s*)?(pago|transfero|transfiero)/.test(t) ||
     /(enviar|mandar)\s*(la\s*)?(plata|dinero)/.test(t)
   );
-}
-
-// ✅ Ubicación / dirección del depósito / local (determinístico)
-function asksStoreLocation(raw: string) {
-  const t = normLite(raw || "");
-  if (!t) return false;
-
-  // Ej: "donde queda el deposito", "direccion del local", "ubicacion", "maps"
-  if (/(donde)\s*(queda|esta)\s*(el|la)?\s*(deposito|local|tienda|sucursal|negocio)/.test(t)) return true;
-  if (/\b(direccion|ubicacion|maps|google|como llego|como llegar)\b/.test(t) && /\b(deposito|local|tienda|sucursal|negocio)\b/.test(t)) {
-    return true;
-  }
-  // "donde queda" sin objeto pero viene de contexto de depósito/local
-  if (/(donde)\s*(queda|esta)/.test(t) && /\b(deposito|local|tienda|sucursal)\b/.test(t)) return true;
-  return false;
-}
-
-function formatStoreLocationReply(doctor: any) {
-  const address =
-    (doctor as any)?.officeAddress ||
-    (doctor as any)?.businessAddress ||
-    (doctor as any)?.address ||
-    (doctor as any)?.storeAddress ||
-    null;
-  const city = (doctor as any)?.officeCity || (doctor as any)?.city || null;
-  const mapsUrl = (doctor as any)?.officeMapsUrl || (doctor as any)?.mapsUrl || null;
-
-  if (!address && !mapsUrl) {
-    return "Todavía no tengo cargada la dirección del depósito/local 😕. Si querés, decime por dónde te queda y lo coordinamos.";
-  }
-
-  const line = address ? `El depósito/local queda en:\n*${address}${city ? `, ${city}` : ""}*` : "";
-  const link = mapsUrl ? `\n\nUbicación: ${mapsUrl}` : "";
-  return `${line}${link}\n\nSi querés, decime desde dónde venís y te digo cómo llegar.`.trim();
-}
-
-// ✅ Rechazo explícito de comprobante (no solo "no")
-function isProofRefusal(raw: string) {
-  const t = normLite(raw || "");
-  if (!t) return false;
-  // Ej: "no voy a mandar ningun comprobante", "no tengo comprobante", "sin comprobante"
-  if (/\b(sin\s+comprobante|no\s+tengo\s+comprobante)\b/.test(t)) return true;
-  if (/\bno\b/.test(t) && /\b(comprobante|captura|recibo|ticket)\b/.test(t) && /(mandar|enviar|pasar|adjuntar)/.test(t)) return true;
-  return false;
 }
 
 function formatAliasReply(businessAlias: string) {
@@ -403,25 +349,6 @@ const clearAwaitingRemoveProduct = (doctorId: number, clientId: number) => {
 // Estado en memoria para "estoy esperando #pedido para asignar comprobante"
 const awaitingProofMap = new Map<string, number>();
 const proofRequestCooldown = new Map<string, number>();
-
-// Estado en memoria: el cliente rechazó mandar comprobante (snooze para no insistir)
-const proofDeclinedMap = new Map<string, number>();
-
-const markProofDeclined = (doctorId: number, clientId: number) => {
-  proofDeclinedMap.set(`${doctorId}:${clientId}`, Date.now());
-};
-
-const hasProofDeclinedRecently = (doctorId: number, clientId: number) => {
-  const key = `${doctorId}:${clientId}`;
-  const ts = proofDeclinedMap.get(key);
-  if (!ts) return false;
-  // Expira a los 30 minutos
-  if (Date.now() - ts > 30 * 60 * 1000) {
-    proofDeclinedMap.delete(key);
-    return false;
-  }
-  return true;
-};
 
 export async function assignLatestUnassignedProofToOrder(params: {
   doctorId: number;
@@ -1108,24 +1035,6 @@ if (awaitingRemove) {
 
   const msgText = (rawText || "").trim();
 
-  // ✅ Dirección / depósito / local (determinístico)
-  // Importante: va ANTES de detectar "transferencia" porque "depósito" puede ser lugar.
-  if (asksStoreLocation(msgText)) {
-    await sendMessage(formatStoreLocationReply(doctor));
-    return true;
-  }
-
-  // ✅ Si el cliente rechaza mandar comprobante, no insistimos por un rato
-  if (isProofRefusal(msgText)) {
-    markProofDeclined(doctor.id, client.id);
-    markProofRequestCooldown(doctor.id, client.id);
-    await clearAwaitingProofOrderNumber({ doctorId: doctor.id, clientId: client.id });
-    await sendMessage(
-      "Dale, no hay drama 🙂. Si después lo podés mandar, mejor para dejarlo registrado. ¿Necesitás algo del pedido o la dirección del depósito?"
-    );
-    return true;
-  }
-
   // ✅ Alias/CBU (determinístico)
   if (asksPaymentMethod(msgText)) {
     const alias = (doctor as any)?.businessAlias?.trim?.();
@@ -1138,15 +1047,7 @@ if (awaitingRemove) {
   }
 
   // ✅ Declaración de transferencia sin comprobante: pedimos el comprobante si no hubo uno reciente
-  if (isTransferMention(msgText) && !asksStoreLocation(msgText)) {
-    // Si el cliente ya nos dijo que NO manda comprobante, no insistimos.
-    if (hasProofDeclinedRecently(doctor.id, client.id)) {
-      await sendMessage(
-        "Dale 🙂. Quedó avisado. Si después querés mandarme el comprobante, lo cargo y listo."
-      );
-      return true;
-    }
-
+  if (isTransferMention(msgText)) {
     const pending = await prisma.order.findFirst({
       where: { doctorId: doctor.id, clientId: client.id, status: "pending" },
       select: { sequenceNumber: true, items: { select: { quantity: true, product: { select: { name: true } } } } },
@@ -1184,9 +1085,12 @@ if (awaitingRemove) {
       return true;
     }
 
-    // Si ya preguntamos hace poco, NO volvemos a pedir comprobante (evita loop).
+    // Si ya preguntamos hace poco, no insistimos; damos acuse simple y seguimos.
     if (shouldSkipProofRequest(doctor.id, client.id)) {
-      await sendMessage("Dale 🙌");
+      const hint = pending?.sequenceNumber
+        ? `Cuando puedas, mandá el comprobante y lo asigno al pedido #${pending.sequenceNumber}.`
+        : "Cuando puedas, mandá el comprobante y lo asigno al pedido.";
+      await sendMessage(hint);
       return true;
     }
 
@@ -1216,6 +1120,15 @@ if (awaitingRemove) {
     select: { body: true },
   });
   const lastBotMsg = lastBotMsgRow?.body || "";
+
+  const lastBotAskedProof = /comprobante|captura de la transferencia|mand[aá] el comprobante/i.test(
+    lastBotMsg
+  );
+
+  if (lastBotAskedProof && (isNo(msgText) || isStopProofText(msgText))) {
+    await sendMessage("Listo, no tomo el pago. Cuando tengas el comprobante, mandalo y lo asigno al pedido.");
+    return true;
+  }
 
   // ✅ Si el cliente pone “eh?/qué?/no entiendo”, repetimos lo último y NO cambiamos de tema
   if (isConfusion(msgText) && lastBotMsg) {
@@ -1312,6 +1225,12 @@ if (awaitingRemove) {
   const isCustomerConfirm = isConfirmText(rawText || "");
 
   if (isCustomerConfirm) {
+    // Si estamos esperando comprobante o pedido para comprobante, ignoramos "confirmo" y pedimos lo pendiente
+    if (awaitingProofOrderNumber || shouldSkipProofRequest(doctor.id, client.id)) {
+      await sendMessage("Necesito primero el comprobante para avanzar. Cuando lo tengas, mandalo y seguimos.");
+      return true;
+    }
+
     const pending = await prisma.order.findFirst({
       where: { doctorId: doctor.id, clientId: client.id, status: "pending" },
       include: { items: { include: { product: true } } },

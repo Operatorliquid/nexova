@@ -177,12 +177,12 @@ const isTransferMention = (raw) => {
         return false;
     return (/\btransfe/.test(t) ||
         /\btransferenc/.test(t) ||
+        /\btransfier/.test(t) || // transfiero, transfieren
+        /\btransferi\b/.test(t) ||
         /\btransfiri/.test(t) ||
         /\bpague\b|\bpago\b|\bte pague\b|\bpagado\b/.test(t) ||
         /\bdeposit/.test(t) ||
-        /\bte (mande|mande|pase|envie) la plata/.test(t) ||
-        /\bte gire/.test(t) ||
-        /\btransferi\b/.test(t));
+        /\bte (mande|mandee|pase|envie|gire) (la\s*)?plata/.test(t));
 };
 const shouldSkipProofRequest = (doctorId, clientId) => {
     const key = `${doctorId}:${clientId}`;
@@ -223,6 +223,15 @@ const isNo = (txt) => {
 const isConfusion = (txt) => {
     const t = norm(txt);
     return /^(eh+|e+|que|ke|como|no entendi|no entiendo)$/.test(t) || t.length === 0;
+};
+const isStopProofText = (txt) => {
+    const t = normLite(txt || "");
+    return (/\bolvid/.test(t) ||
+        /\bdejalo\b/.test(t) ||
+        /\bdespues\b|\bdesp\b/.test(t) ||
+        /\bmas\s+tarde\b/.test(t) ||
+        /\bno puedo\b/.test(t) ||
+        /\bno lo tengo\b/.test(t));
 };
 const firstSentence = (s) => {
     if (!s)
@@ -909,6 +918,11 @@ async function handleRetailAgentAction(params) {
         select: { body: true },
     });
     const lastBotMsg = (lastBotMsgRow === null || lastBotMsgRow === void 0 ? void 0 : lastBotMsgRow.body) || "";
+    const lastBotAskedProof = /comprobante|captura de la transferencia|mand[aá] el comprobante/i.test(lastBotMsg);
+    if (lastBotAskedProof && (isNo(msgText) || isStopProofText(msgText))) {
+        await sendMessage("Listo, no tomo el pago. Cuando tengas el comprobante, mandalo y lo asigno al pedido.");
+        return true;
+    }
     // ✅ Si el cliente pone “eh?/qué?/no entiendo”, repetimos lo último y NO cambiamos de tema
     if (isConfusion(msgText) && lastBotMsg) {
         const core = firstSentence(lastBotMsg);
@@ -981,6 +995,11 @@ async function handleRetailAgentAction(params) {
     }
     const isCustomerConfirm = isConfirmText(rawText || "");
     if (isCustomerConfirm) {
+        // Si estamos esperando comprobante o pedido para comprobante, ignoramos "confirmo" y pedimos lo pendiente
+        if (awaitingProofOrderNumber || shouldSkipProofRequest(doctor.id, client.id)) {
+            await sendMessage("Necesito primero el comprobante para avanzar. Cuando lo tengas, mandalo y seguimos.");
+            return true;
+        }
         const pending = await prisma_1.prisma.order.findFirst({
             where: { doctorId: doctor.id, clientId: client.id, status: "pending" },
             include: { items: { include: { product: true } } },
