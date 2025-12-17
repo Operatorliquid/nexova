@@ -3850,14 +3850,23 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
           await prisma.product.findMany({
             where: { doctorId: doctor.id },
             orderBy: { name: "asc" },
-            select: { name: true, price: true, quantity: true, categories: true },
+            select: {
+              name: true,
+              price: true,
+              quantity: true,
+              categories: true,
+              description: true,
+              tags: { select: { label: true } },
+            },
             take: 120,
           })
         ).map((p) => ({
           name: p.name,
           price: p.price,
           unit: "u",
-          keywords: Array.isArray(p.categories) ? p.categories : [],
+          categories: Array.isArray(p.categories) ? p.categories : [],
+          tagLabels: Array.isArray(p.tags) ? p.tags.map((t) => t.label) : [],
+          description: p.description || undefined,
         })) || [];
 
       const activePromotions =
