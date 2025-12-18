@@ -1159,6 +1159,30 @@ if (awaitingRemove) {
     }
   }
 
+  // ✅ Confirmación de cancelación después de que el bot preguntó
+  if (lastBotAskedCancel(lastBotMsg) && isYes(msgText)) {
+    const pending = await prisma.order.findFirst({
+      where: { doctorId: doctor.id, clientId: client.id, status: "pending" },
+      include: { items: true },
+      orderBy: { createdAt: "desc" },
+    });
+
+    if (!pending) {
+      await sendMessage("No encontré un pedido para cancelar.");
+      return true;
+    }
+
+    await restockOrderInventory(pending);
+    await prisma.order.update({
+      where: { id: pending.id },
+      data: { status: "cancelled" },
+    });
+    await sendMessage(
+      `Listo, cancelé el pedido #${pending.sequenceNumber}. Si querés armar uno nuevo, decime qué productos necesitas.`
+    );
+    return true;
+  }
+
   const candidateSeq = parseProofCandidateFromLastBotMessage(lastBotMsg);
 
   if (candidateSeq && (isYes(msgText) || isNo(msgText))) {
