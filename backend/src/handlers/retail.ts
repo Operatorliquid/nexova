@@ -284,6 +284,8 @@ const firstSentence = (s: string) => {
 // ✅ FIX: Detecta si el último mensaje del bot ofrecía promo o preguntaba cancelar
 const lastBotAskedCancel = (lastBotMsg: string) => /\bcancel/.test(norm(lastBotMsg));
 
+const lastBotAskedCatalog = (lastBotMsg: string) => /\bcatal[oó]g/.test(norm(lastBotMsg));
+
 const lastBotAskedPromo = (lastBotMsg: string) => {
   const t = norm(lastBotMsg);
   const hasPromoWord = t.includes("promo") || t.includes("descuento") || t.includes("off");
@@ -322,10 +324,18 @@ function extractOrderSeqFromText(text: string): number | null {
 
 function parseProofCandidateFromLastBotMessage(lastBotMsg: string): number | null {
   if (!lastBotMsg) return null;
+  const seq = extractOrderSeqFromText(lastBotMsg);
+  if (!seq) return null;
+
+  // Aceptamos tanto mensajes de “recibí el comprobante” como preguntas “¿Es para el pedido #X?”
   const looksLikeProof =
-    /(recib[ií].*(archivo|comprobante)|pdf|transferencia|mp|mercado\s*pago)/i.test(lastBotMsg);
-  if (!looksLikeProof) return null;
-  return extractOrderSeqFromText(lastBotMsg);
+    /(recib[ií].*(archivo|comprobante)|pdf|transferencia|mp|mercado\s*pago|comprobante)/i.test(
+      lastBotMsg
+    );
+  const proofQuestion = /para\s+el\s+pedido/i.test(lastBotMsg) || /\?\s*$/.test(lastBotMsg);
+
+  if (!looksLikeProof && !proofQuestion) return null;
+  return seq;
 }
 
 
@@ -522,6 +532,98 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
     });
   };
 
+  // Envía el catálogo PDF (con fallback a link) y registra el mensaje
+  const sendCatalog = async () => {
+    if (!products.length) {
+      await sendMessage("Todavía no tengo cargado el catálogo para compartir 📄.");
+      return true;
+    }
+
+    let logoUrl: string | null | undefined = (doctor as any).ticketLogoUrl;
+    if (logoUrl === undefined) {
+      const doctorLogo = await prisma.doctor.findUnique({
+        where: { id: doctor.id },
+        select: { ticketLogoUrl: true },
+      });
+      logoUrl = doctorLogo?.ticketLogoUrl ?? null;
+    }
+
+    try {
+      const catalog = await createCatalogPdf({
+        doctorId: doctor.id,
+        doctorName: doctor.name || "Catálogo",
+        products: products.map((p) => ({
+          name: p.name,
+          price: p.price,
+          description: p.description || undefined,
+          imageUrl: p.imageUrl || undefined,
+        })),
+        logoUrl: logoUrl || null,
+        generatedAt: new Date(),
+      });
+
+      if (!catalog.publicUrl) {
+        await sendMessage("No pude generar el PDF del catálogo ahora mismo. Probemos de nuevo en un rato.");
+        return true;
+      }
+
+      const reply =
+        "Te paso el catálogo en PDF con precios y detalles. Contame qué querés pedir 👌";
+      const messageWithHint = appendMenuHintForBusiness(reply, doctor.businessType as any);
+
+      const isHttpsPublic =
+        /^https:\/\//i.test(catalog.publicUrl) && !/localhost|127\.0\.0\.1/i.test(catalog.publicUrl);
+
+      if (isHttpsPublic) {
+        try {
+          const waResult = await sendWhatsAppText(
+            phoneE164,
+            messageWithHint,
+            doctorWhatsappConfig,
+            catalog.publicUrl
+          );
+          await prisma.message.create({
+            data: {
+              waMessageId: (waResult as any)?.sid ?? null,
+              from: doctorNumber,
+              to: phoneE164,
+              direction: "outgoing",
+              type: "other",
+              body: reply,
+              rawPayload: waResult,
+              retailClientId: client.id,
+              doctorId: doctor.id,
+            },
+          });
+          return true;
+        } catch (err) {
+          console.warn("[RetailAgent] No se pudo enviar media WhatsApp, hago fallback a link:", err);
+        }
+      }
+
+      // Fallback: mandamos el link en texto (evita errores de MediaUrl en local/http)
+      const replyWithLink = `${reply}\n${catalog.publicUrl}`;
+      const waResult = await sendWhatsAppText(phoneE164, replyWithLink, doctorWhatsappConfig);
+      await prisma.message.create({
+        data: {
+          waMessageId: (waResult as any)?.sid ?? null,
+          from: doctorNumber,
+          to: phoneE164,
+          direction: "outgoing",
+          type: "text",
+          body: replyWithLink,
+          rawPayload: waResult,
+          retailClientId: client.id,
+          doctorId: doctor.id,
+        },
+      });
+    } catch (error) {
+      console.error("[RetailAgent] Error generando catálogo PDF:", error);
+      await sendMessage("No pude generar el catálogo ahora mismo. Avisame y te lo reenvío.");
+    }
+    return true;
+  };
+
   // Actualizar datos básicos del cliente si el agente los envió
   const maybeUpdateProfile = async () => {
     const info = action.clientInfo;
@@ -578,96 +680,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
 
   const askedForCatalog = wantsCatalog(rawText || "");
   if (askedForCatalog) {
-    if (!products.length) {
-      await sendMessage("Todavía no tengo cargado el catálogo para compartir 📄.");
-      return true;
-    }
-
-    let logoUrl: string | null | undefined = (doctor as any).ticketLogoUrl;
-    if (logoUrl === undefined) {
-      const doctorLogo = await prisma.doctor.findUnique({
-        where: { id: doctor.id },
-        select: { ticketLogoUrl: true },
-      });
-      logoUrl = doctorLogo?.ticketLogoUrl ?? null;
-    }
-
-    try {
-      const catalog = await createCatalogPdf({
-        doctorId: doctor.id,
-        doctorName: doctor.name || "Catálogo",
-        products: products.map((p) => ({
-          name: p.name,
-          price: p.price,
-          description: p.description || undefined,
-          imageUrl: p.imageUrl || undefined,
-        })),
-        logoUrl: logoUrl || null,
-        generatedAt: new Date(),
-      });
-
-      if (!catalog.publicUrl) {
-        await sendMessage("No pude generar el PDF del catálogo ahora mismo. Probemos de nuevo en un rato.");
-        return true;
-      }
-
-      const reply =
-        "Te paso el catálogo en PDF con precios y detalles. Contame qué querés pedir 👌";
-      const messageWithHint = appendMenuHintForBusiness(reply, doctor.businessType as any);
-
-      const isHttpsPublic = /^https:\/\//i.test(catalog.publicUrl) && !/localhost|127\.0\.0\.1/i.test(catalog.publicUrl);
-
-      if (isHttpsPublic) {
-        try {
-          const waResult = await sendWhatsAppText(
-            phoneE164,
-            messageWithHint,
-            doctorWhatsappConfig,
-            catalog.publicUrl
-          );
-          await prisma.message.create({
-            data: {
-              waMessageId: (waResult as any)?.sid ?? null,
-              from: doctorNumber,
-              to: phoneE164,
-              direction: "outgoing",
-              type: "other",
-              body: reply,
-              rawPayload: waResult,
-              retailClientId: client.id,
-              doctorId: doctor.id,
-            },
-          });
-          return true;
-        } catch (err) {
-          console.warn("[RetailAgent] No se pudo enviar media WhatsApp, hago fallback a link:", err);
-        }
-      }
-
-      // Fallback: mandamos el link en texto (evita errores de MediaUrl en local/http)
-      const replyWithLink = `${reply}\n${catalog.publicUrl}`;
-      const waResult = await sendWhatsAppText(
-        phoneE164,
-        replyWithLink,
-        doctorWhatsappConfig
-      );
-      await prisma.message.create({
-        data: {
-          waMessageId: (waResult as any)?.sid ?? null,
-          from: doctorNumber,
-          to: phoneE164,
-          direction: "outgoing",
-          type: "text",
-          body: replyWithLink,
-          rawPayload: waResult,
-          retailClientId: client.id,
-          doctorId: doctor.id,
-        },
-      });
-    } catch (error) {
-      console.error("[RetailAgent] Error generando catálogo PDF:", error);
-      await sendMessage("No pude generar el catálogo ahora mismo. Avisame y te lo reenvío.");
-    }
+    await sendCatalog();
     return true;
   }
 
@@ -720,7 +733,7 @@ const hasOtherModifyIntent = /\b(sum(ar|ame|a)?|agreg(ar|ame|a|alas)?|anad(ir|im
   removeIncoming
 );
 
-  if (isRemoveIntent) {
+  if (isRemoveIntent && !hasOtherModifyIntent) {
     const pending = await prisma.order.findFirst({
       where: { doctorId: doctor.id, clientId: client.id, status: "pending" },
       include: { items: { include: { product: true } } },
@@ -1159,6 +1172,16 @@ if (awaitingRemove) {
     }
   }
 
+  // ✅ Seguimiento de catálogo: si el bot ofreció catálogo y el cliente responde sí/no
+  if (lastBotAskedCatalog(lastBotMsg) && (isYes(msgText) || isNo(msgText))) {
+    if (isNo(msgText)) {
+      await sendMessage("Dale, no te envío el catálogo. Decime qué necesitás y te ayudo.");
+      return true;
+    }
+    await sendCatalog();
+    return true;
+  }
+
   // ✅ Confirmación de cancelación después de que el bot preguntó
   if (lastBotAskedCancel(lastBotMsg) && isYes(msgText)) {
     const pending = await prisma.order.findFirst({
@@ -1254,6 +1277,30 @@ if (awaitingRemove) {
   const isCustomerConfirm = isConfirmText(rawText || "");
 
   if (isCustomerConfirm) {
+    // ✅ Si el último bot pidió confirmar cancelación, lo tratamos como cancel
+    if (lastBotAskedCancel(lastBotMsg)) {
+      const pending = await prisma.order.findFirst({
+        where: { doctorId: doctor.id, clientId: client.id, status: "pending" },
+        include: { items: true },
+        orderBy: { createdAt: "desc" },
+      });
+
+      if (!pending) {
+        await sendMessage("No encontré un pedido para cancelar.");
+        return true;
+      }
+
+      await restockOrderInventory(pending);
+      await prisma.order.update({
+        where: { id: pending.id },
+        data: { status: "cancelled" },
+      });
+      await sendMessage(
+        `Listo, cancelé el pedido #${pending.sequenceNumber}. Si querés armar otro, pasame productos y cantidades.`
+      );
+      return true;
+    }
+
     // Si estamos esperando comprobante o pedido para comprobante, ignoramos "confirmo" y pedimos lo pendiente
     if (awaitingProofOrderNumber || shouldSkipProofRequest(doctor.id, client.id)) {
       await sendMessage("Necesito primero el comprobante para avanzar. Cuando lo tengas, mandalo y seguimos.");
@@ -1381,30 +1428,73 @@ if (awaitingRemove) {
     return appearsInMessage(candidate, rawText);
   });
 
+  // Fallback robusto: capturar patrones "n producto" incluso si la IA omitió alguno
+  const fallbackItems: Array<{ name: string; quantity: number }> = [];
+  const fallbackRemovals: Array<{ name: string; quantity: number }> = [];
+  const tokens = norm(rawText || "");
+  const matches = Array.from(tokens.matchAll(/\b(\d+)\s+([a-z0-9][a-z0-9\s]{1,40})/gi)).slice(0, 8);
+  for (const m of matches) {
+    const qty = Number(m[1]);
+    const candidateName = (m[2] || "").trim();
+    if (qty > 0 && candidateName) {
+      fallbackItems.push({ name: candidateName, quantity: qty });
+    }
+  }
+
+  // Detectar patrones de quitar/sacar para mapear a op=remove sin bloquear el resto del mensaje
+  const removeMatches = Array.from(
+    tokens.matchAll(
+      /\b(quit(a|ar|ame)|sac(a|ar|ame)|elimin(a|ar|ame)|borr(a|ar|ame)|sin)\s+(\d+)?\s*([a-z0-9][a-z0-9\s]{1,40})/gi
+    )
+  ).slice(0, 8);
+  for (const m of removeMatches) {
+    const qtyRaw = m[6];
+    const nameRaw = (m[7] || "").trim();
+    const qty = qtyRaw ? Number(qtyRaw) : 1;
+    if (nameRaw) {
+      fallbackRemovals.push({ name: nameRaw, quantity: qty > 0 ? qty : 1 });
+    }
+  }
+
+  if (fallbackItems.length > 0) {
+    const existingKeys = items
+      .map((it: any) => norm((it?.normalizedName || it?.name || "").toString()))
+      .filter(Boolean);
+    for (const fb of fallbackItems) {
+      const key = norm(fb.name);
+      const overlaps = existingKeys.some((k) => k.includes(key) || key.includes(k));
+      if (overlaps) continue;
+      items.push({
+        name: fb.name,
+        normalizedName: fb.name,
+        quantity: fb.quantity,
+        op: "add",
+      });
+      existingKeys.push(key);
+    }
+  }
+
+  if (fallbackRemovals.length > 0) {
+    const existingKeys = items
+      .map((it: any) => norm((it?.normalizedName || it?.name || "").toString()))
+      .filter(Boolean);
+    for (const fb of fallbackRemovals) {
+      const key = norm(fb.name);
+      const overlaps = existingKeys.some((k) => k.includes(key) || key.includes(k));
+      if (overlaps) continue;
+      items.push({
+        name: fb.name,
+        normalizedName: fb.name,
+        quantity: fb.quantity,
+        op: "remove",
+      });
+      existingKeys.push(key);
+    }
+  }
+
   if (!items || items.length === 0) {
-    // Fallback rápido: leer patrones "n producto" del mensaje (ej: "quiero 5 cocas")
-    const fallbackItems: Array<{ name: string; quantity: number }> = [];
-    const tokens = norm(rawText || "");
-    const matches = Array.from(tokens.matchAll(/\b(\d+)\s+([a-z0-9][a-z0-9\s]{1,40})/gi)).slice(0, 5);
-    for (const m of matches) {
-      const qty = Number(m[1]);
-      const candidateName = (m[2] || "").trim();
-      if (qty > 0 && candidateName) {
-        fallbackItems.push({ name: candidateName, quantity: qty });
-      }
-    }
-
-    if (fallbackItems.length === 0) {
-      await sendMessage("Decime productos y cantidades, ej: 2 coca, 3 galletitas.");
-      return true;
-    }
-
-    items = fallbackItems.map((it) => ({
-      name: it.name,
-      normalizedName: it.name,
-      quantity: it.quantity,
-      op: "add",
-    }));
+    await sendMessage("Decime productos y cantidades, ej: 2 coca, 3 galletitas.");
+    return true;
   }
 
   const normalized = items
