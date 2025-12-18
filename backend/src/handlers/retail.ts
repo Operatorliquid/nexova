@@ -56,14 +56,19 @@ const stem = (w: string) => w.replace(/(es|s)$/i, "");
 
 const appearsInMessage = (itemName: string, rawText: string) => {
   const msg = norm(rawText);
+  const msgTokens = msg.split(" ").filter((t) => t.length >= 3);
   const tokens = norm(itemName)
     .split(" ")
     .map(stem)
     .filter((t) => t.length >= 3);
 
   if (tokens.length === 0) return false;
-  // con que matchee 1 token “fuerte” alcanza (coca / yerba / galletit…)
-  return tokens.some((t) => msg.includes(t));
+  // Allow light partial matches so “cocas” matches “CocaCola”.
+  return tokens.some((t) => {
+    if (msg.includes(t)) return true;
+    if (t.length >= 4 && msg.includes(t.slice(0, 4))) return true;
+    return msgTokens.some((mt) => t.includes(mt) || mt.includes(t));
+  });
 };
 
 type OfficeDaySet = Set<number>;
