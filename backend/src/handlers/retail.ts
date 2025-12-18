@@ -1601,8 +1601,16 @@ if (awaitingRemove) {
   }
 
   // "sumar/agregar" => suma cantidades. Si no, setea la cantidad del producto mencionado.
-  const addMode =
+  let addMode =
     action.mode === "merge" || /\b(sum(ar|ame|á)|agreg(ar|ame|á|alas)|añad(ir|ime|í)|mas|\+)\b/i.test(rawText);
+
+  // Si el cliente dice "quiero/armame/haceme" con lista completa y hay un pendiente,
+  // preferimos reemplazar cantidades en vez de sumar para evitar duplicar.
+  const wantsFreshReplace =
+    pendingOrders.length > 0 &&
+    resolvedItems.length > 0 &&
+    /\b(quiero|armame|arma|haceme|hace(me)?|pasame|pedido nuevo|arranca|empeza|empezar)\b/i.test(rawText || "") &&
+    !/\b(sum(ar|ame|á)|agreg(ar|ame|á|alas)|añad(ir|ime|í)|mas|\+)\b/i.test(rawText || "");
 
   const target = pendingOrders[0] ?? null;
   const targetOrderId = target?.id ?? null;
@@ -1625,9 +1633,15 @@ if (awaitingRemove) {
     target.items.forEach((it) => currentQuantities.set(it.productId, it.quantity));
   }
 
+  if (wantsFreshReplace) {
+    currentQuantities.clear();
+    addMode = false;
+  }
+
   for (const it of resolvedItems) {
     const baseOp = (it as any).op as string | undefined;
-    const op: "add" | "remove" | "set" = baseOp === "remove" || baseOp === "set" ? baseOp : "add";
+    const op: "add" | "remove" | "set" =
+      baseOp === "remove" ? "remove" : baseOp === "set" ? "set" : addMode ? "add" : "set";
     const qty = Math.max(0, Math.trunc((it as any).quantity || 0));
     const prev = currentQuantities.get(it.productId) ?? 0;
 

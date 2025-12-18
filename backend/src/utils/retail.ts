@@ -49,6 +49,7 @@ export function matchProductName(
   const queryNorm = normalizeText(query);
   const queryNoSpace = queryNorm.replace(/\s+/g, "");
   const queryTokens = tokenizeProductQuery(query);
+  const queryStems = new Set(queryTokens.map((t) => t.replace(/s$/, "")));
 
   let best: { product: Product | null; score: number } = {
     product: null,
@@ -58,21 +59,32 @@ export function matchProductName(
   for (const product of products) {
     const nameNorm = normalizeText(product.name);
     const nameTokens = tokenizeProductQuery(product.name);
+    const nameStems = new Set(nameTokens.map((t) => t.replace(/s$/, "")));
     const nameNoSpace = nameNorm.replace(/\s+/g, "");
     const aliases = buildProductAliases(nameNorm, nameNoSpace);
     const keywords: string[] = [];
-    if (Array.isArray((product as any).categories)) {
-      keywords.push(...((product as any).categories as any[]).map((c) => normalizeText(String(c))));
-    }
-    if (Array.isArray((product as any).tags)) {
-      keywords.push(...((product as any).tags as any[]).map((t) => normalizeText(String((t as any).label || t))));
-    }
-    if (Array.isArray((product as any).tagLabels)) {
-      keywords.push(...((product as any).tagLabels as any[]).map((t) => normalizeText(String(t))));
-    }
-    if ((product as any).description) {
-      keywords.push(...tokenizeProductQuery(String((product as any).description)));
-    }
+    const keywordTokens: string[] = [];
+    const collect = (val: any) => {
+      if (Array.isArray(val)) {
+        val.forEach((v) => {
+          const norm = normalizeText(String((v as any).label ?? v ?? ""));
+          if (norm) {
+            keywords.push(norm);
+            keywordTokens.push(...tokenizeProductQuery(norm));
+          }
+        });
+      } else if (val) {
+        const norm = normalizeText(String(val));
+        keywords.push(norm);
+        keywordTokens.push(...tokenizeProductQuery(norm));
+      }
+    };
+
+    collect((product as any).categories);
+    collect((product as any).tags);
+    collect((product as any).tagLabels);
+    collect((product as any).description);
+
     let score = 0;
 
     if (nameNorm.includes(queryNorm) || queryNorm.includes(nameNorm)) {
@@ -84,8 +96,34 @@ export function matchProductName(
 
     for (const token of queryTokens) {
       if (!token) continue;
-      if (nameTokens.includes(token) || nameNorm.includes(token) || keywords.includes(token)) {
+      const stem = token.replace(/s$/, "");
+      if (
+        nameTokens.includes(token) ||
+        nameStems.has(stem) ||
+        nameNorm.includes(token) ||
+        keywords.includes(token) ||
+        keywordTokens.includes(token) ||
+        keywordTokens.includes(stem)
+      ) {
         score += 1;
+      } else {
+        // tolerar prefijos de 4+ chars o coincidencias en descripción/tags
+        if (token.length >= 4) {
+          if (
+            nameTokens.some((nt) => nt.startsWith(token) || token.startsWith(nt)) ||
+            keywordTokens.some((kt) => kt.startsWith(token) || token.startsWith(kt))
+          ) {
+            score += 0.75;
+          }
+        }
+      }
+    }
+
+    // Boost fuerte si alguna palabra clave/tag/descripcion contiene el stem del query (galletitas -> tag "galletitas")
+    for (const stem of queryStems) {
+      if (!stem) continue;
+      if (nameStems.has(stem) || keywordTokens.includes(stem) || keywords.some((k) => k.includes(stem))) {
+        score += 2;
       }
     }
 
