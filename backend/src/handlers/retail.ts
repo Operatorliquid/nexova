@@ -198,6 +198,7 @@ type RetailConversationState = {
     | {
         kind: "cancel_confirmation";
         orderSequence?: number | null;
+        orderId?: number | null;
         createdAt: number;
         prompt?: string;
       }
@@ -958,6 +959,8 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
   }
 
   await maybeUpdateProfile();
+
+  const msgText = (rawText || "").trim();
 
   // Último mensaje del bot (para seguir el hilo)
   const lastBotMsgRow = await prisma.message.findFirst({
@@ -1832,8 +1835,6 @@ if (awaitingRemove) {
       return true;
     }
   }
-
-  const msgText = (rawText || "").trim();
 
   if (isLocationQuestion(msgText)) {
     const addr =
