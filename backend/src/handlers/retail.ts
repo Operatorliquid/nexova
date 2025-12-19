@@ -2493,7 +2493,7 @@ Respondeme con el número de opción (ej: "1")` +
     /\b(quiero|armame|arma|haceme|hace(me)?|pasame|pedido nuevo|arranca|empeza|empezar)\b/i.test(rawText || "") &&
     !/\b(sum(ar|ame|á)|agreg(ar|ame|á|alas)|añad(ir|ime|í)|mas|\+)\b/i.test(rawText || "");
 
-  let target = pendingOrders[0] ?? null;
+  target = pendingOrders[0] ?? target;
   const targetOrderId = target?.id ?? null;
   const beforeItemsSnapshot = (target?.items || []).map((it) => {
     const productName = products.find((p) => p.id === it.productId)?.name || "Producto";
