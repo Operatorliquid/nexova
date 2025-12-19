@@ -962,6 +962,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
   await maybeUpdateProfile();
 
   const msgText = (rawText || "").trim();
+  const normMsg = norm(msgText);
 
   // Último mensaje del bot (para seguir el hilo)
   const lastBotMsgRow = await prisma.message.findFirst({
@@ -1053,9 +1054,18 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
     (msgText.trim().split(/\s+/).length <= 4 && msgText.trim().length <= 40);
 
   if (awaiting && softAckShort) {
-    await clearRetailAwaiting(client.id);
-    await sendMessage("Dale, avisame qué necesitás y seguimos.");
-    // seguimos por si el mensaje trae más contexto
+    const ackKinds = new Set([
+      "catalog_offer",
+      "location_offer",
+      "promo_offer",
+      "stock_replacement",
+    ]);
+    if (ackKinds.has((awaiting as any).kind)) {
+      await clearRetailAwaiting(client.id);
+      awaiting = null;
+      await sendMessage("Dale, avisame qué necesitás y seguimos.");
+      return true;
+    }
   }
 
   // Ack genérico después de respuesta informativa (sin awaiting)
@@ -1064,8 +1074,16 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
     return true;
   }
 
+  // ⛔️ Guardrail: si no hay verbos de pedido ni cantidades, nunca procesar retail_upsert_order
+  const hasOrderIntent = hasOrderVerb(normMsg) || hasQtyPattern(normMsg);
+  if (!hasOrderIntent && action?.type === "retail_upsert_order") {
+    action = { type: "general", items: [] };
+    replyToPatient = "Contame qué necesitás (pedido, precio, stock o ubicación) y te ayudo.";
+  }
+
   // Pregunta de ubicación: siempre responder directo y limpiar estados anteriores
   if (isLocationQuestion(msgText)) {
+    console.log("[Retail] Location question detected", { msg: msgText });
     await clearRetailAwaiting(client.id);
     const addr =
       (doctor as any).businessAddress ||
