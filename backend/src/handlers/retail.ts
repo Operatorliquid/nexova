@@ -71,6 +71,138 @@ const appearsInMessage = (itemName: string, rawText: string) => {
   });
 };
 
+
+// ===============================
+// ✅ Detección de consultas vs pedido (para NO agregar cosas por una pregunta)
+// ===============================
+const hasOrderVerb = (t: string) =>
+  /\b(quiero|dame|mandame|armame|haceme|hace(me)?|poneme|sumar|suma|agregar|agrega|anadir|añadir|llevo|te pido|pasame|anota|anotame|meteme)\b/i.test(
+    t
+  );
+
+const hasQtyPattern = (t: string) => /\b\d+\s*(?:x|×)?\s*[a-z]\b/i.test(t);
+
+const looksLikeInquiry = (raw: string) => {
+  const t = norm(raw || "");
+  if (!t) return false;
+  // Si hay verbo de compra/modificación o patrón de cantidad, NO es consulta.
+  if (hasOrderVerb(t) || hasQtyPattern(t)) return false;
+  // Pregunta explícita
+  if ((raw || "").includes("?")) return true;
+  // Preguntas típicas (sin cantidad)
+  return /\b(tenes|tienen|hay|vendes|venden|stock|disponible|precio|cuanto|a cuanto|sale)\b/i.test(t);
+};
+
+const extractInquiryTerm = (raw: string) => {
+  const t = norm(raw || "");
+  // sacamos frases comunes
+  return t
+    .replace(
+      /\b(tenes|tienen|hay|vendes|venden|me decis|decime|por favor|precio|cuanto sale|cuanto|a cuanto|sale)\b/g,
+      ""
+    )
+    .replace(/\b(el|la|los|las|un|una|unos|unas|de|del)\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+};
+
+const productSearchText = (p: any) =>
+  norm(
+    [
+      p?.name || "",
+      ...(Array.isArray(p?.categories) ? p.categories : []),
+      p?.description || "",
+      ...(Array.isArray(p?.tags) ? p.tags.map((t: any) => t.label) : []),
+    ].join(" ")
+  );
+
+const findProductsByTerm = (term: string, products: any[], limit = 6) => {
+  const q = norm(term || "");
+  if (!q) return [];
+  const tokens = q.split(" ").filter((w) => w.length >= 3);
+
+  const scored = products
+    .map((p) => {
+      const txt = productSearchText(p);
+      let score = 0;
+      for (const tok of tokens) {
+        if (txt.includes(tok)) score += 2;
+        else if (tok.length >= 4 && txt.includes(tok.slice(0, 4))) score += 1;
+      }
+      // boost si es término genérico tipo galletitas/snacks
+      if (/(galletit|galleta|snack|bizcoch)/.test(q) && /(galletit|galleta|snack|bizcoch)/.test(txt)) score += 2;
+      return { p, score };
+    })
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((x) => x.p);
+
+  return scored;
+};
+
+const formatProductOptions = (list: any[]) =>
+  list
+    .map(
+      (p: any, i: number) =>
+        `${i + 1}) ${p.name} — $${p.price ?? 0} (stock: ${p.quantity ?? 0})`
+    )
+    .join("\n");
+
+// ===============================
+// ✅ Estado conversacional 24h (para seguir el hilo cuando hacemos preguntas)
+// Guarda cosas como: "¿Cuál galletita querés?" -> el próximo mensaje "2" se interpreta bien
+// ===============================
+const STATE_TTL_MS = 24 * 60 * 60 * 1000;
+
+type RetailConversationState = {
+  awaiting?:
+    | {
+        kind: "choose_product";
+        term: string;
+        candidates: Array<{ productId: number; name: string }>;
+        desiredQuantity?: number;
+        op?: "add" | "set";
+        createdAt: number;
+      }
+    | null;
+};
+
+async function loadRetailConversationState(clientId: number): Promise<RetailConversationState> {
+  const row = await prisma.retailClient.findUnique({
+    where: { id: clientId },
+    select: { conversationState: true, conversationStateUpdatedAt: true },
+  });
+
+  const updatedAt = (row as any)?.conversationStateUpdatedAt
+    ? new Date((row as any).conversationStateUpdatedAt).getTime()
+    : 0;
+
+  if (!updatedAt || Date.now() - updatedAt > STATE_TTL_MS) return {};
+
+  const st = (row as any)?.conversationState;
+  if (!st || typeof st !== "object") return {};
+  return st as any;
+}
+
+async function saveRetailConversationState(clientId: number, state: RetailConversationState) {
+  await prisma.retailClient.update({
+    where: { id: clientId },
+    data: {
+      conversationState: state as any,
+      conversationStateUpdatedAt: new Date(),
+    },
+  });
+}
+
+async function clearRetailAwaiting(clientId: number) {
+  const st = await loadRetailConversationState(clientId);
+  if (!st.awaiting) return;
+  st.awaiting = null;
+  await saveRetailConversationState(clientId, st);
+}
+
+
 type OfficeDaySet = Set<number>;
 
 const parseOfficeDays = (raw?: string | null): OfficeDaySet | null => {
@@ -460,18 +592,18 @@ export async function getAwaitingProofOrderNumber(params: {
   return true;
 }
 
-export async function handleRetailAgentAction(params: HandleRetailParams) {
-  const {
+export async function handleRetailAgentAction(params: HandleRetailParams) {  const {
     doctor,
     patient,
     retailClient,
-    action,
-    replyToPatient,
     phoneE164,
     doctorNumber,
     doctorWhatsappConfig,
     rawText,
   } = params;
+
+  let action = params.action;
+  let replyToPatient = params.replyToPatient;
 
   let client = retailClient;
 
@@ -678,6 +810,105 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
   }
 
   await maybeUpdateProfile();
+  // ===============================
+  // ✅ Seguir el hilo: si estamos esperando que el cliente elija una opción
+  // (ej: "faltan galletitas" -> ofrecemos 1) Don Satur 2) ... -> cliente responde "2")
+  // ===============================
+  const conv = await loadRetailConversationState(client.id);
+  if (conv?.awaiting?.kind === "choose_product") {
+    const t = norm(rawText || "");
+    const candidates = conv.awaiting.candidates || [];
+    const desiredQty = typeof conv.awaiting.desiredQuantity === "number" ? conv.awaiting.desiredQuantity : undefined;
+
+    // números en el mensaje (puede ser "1", o "1 x 2")
+    const nums = Array.from(t.matchAll(/\b(\d+)\b/g)).map((m) => Number(m[1]));
+
+    let choiceIdx: number | null = null;
+    let qty: number | undefined = undefined;
+
+    if (nums.length >= 2 && nums[0] >= 1 && nums[0] <= candidates.length) {
+      choiceIdx = nums[0];
+      qty = nums[1];
+    } else if (nums.length === 1) {
+      const n = nums[0];
+      // Si ya teníamos una cantidad esperada (por el mensaje original), un "2" probablemente es opción #2
+      if (desiredQty && n >= 1 && n <= candidates.length) {
+        choiceIdx = n;
+        qty = desiredQty;
+      } else if (n >= 1 && n <= candidates.length && (t === String(n) || t.startsWith(String(n) + " "))) {
+        choiceIdx = n;
+        qty = desiredQty;
+      } else {
+        // si no parece opción, lo tomamos como cantidad
+        qty = n;
+      }
+    }
+
+    // Si no eligió por número, intentamos por nombre
+    if (!choiceIdx) {
+      const byName = candidates.findIndex((c) => norm(c.name).includes(t) || t.includes(norm(c.name)));
+      if (byName >= 0) {
+        choiceIdx = byName + 1;
+        qty = qty ?? desiredQty;
+      }
+    }
+
+    // Si mandó solo cantidad, la guardamos y volvemos a pedir opción
+    if (!choiceIdx && qty && qty > 0) {
+      conv.awaiting.desiredQuantity = qty;
+      await saveRetailConversationState(client.id, conv);
+      await sendMessage(
+        `Dale. ¿Cuál opción querés para *${conv.awaiting.term}*?\n\n` +
+          formatProductOptions(
+            candidates.map((c) => ({
+              name: c.name,
+              price: (products.find((p: any) => p.id === c.productId) as any)?.price ?? 0,
+              quantity: (products.find((p: any) => p.id === c.productId) as any)?.quantity ?? 0,
+            }))
+          ) +
+          `\n\nRespondé con el número (1, 2, 3...)`
+      );
+      return true;
+    }
+
+    if (!choiceIdx || choiceIdx < 1 || choiceIdx > candidates.length) {
+      await sendMessage(
+        `No te entendí cuál elegís 🙏 Respondé con el número de opción (1, 2, 3...) para *${conv.awaiting.term}*.`
+      );
+      return true;
+    }
+
+    const selected = candidates[choiceIdx - 1];
+    const finalQty = qty && qty > 0 ? qty : desiredQty;
+
+    if (!finalQty || finalQty <= 0) {
+      // Tenemos el producto, falta cantidad
+      conv.awaiting.candidates = [selected];
+      conv.awaiting.desiredQuantity = undefined;
+      await saveRetailConversationState(client.id, conv);
+      await sendMessage(`Perfecto: *${selected.name}*. ¿Cuántas querés? (ej: 2)`);
+      return true;
+    }
+
+    // Convertimos esta respuesta en una acción de upsert para reutilizar el resto del flujo.
+    action = {
+      type: "retail_upsert_order",
+      mode: "merge",
+      status: "pending",
+      items: [
+        {
+          name: selected.name,
+          normalizedName: selected.name,
+          quantity: finalQty,
+          op: conv.awaiting.op || "add",
+          note: "",
+        },
+      ],
+    } as any;
+
+    await clearRetailAwaiting(client.id);
+  }
+
 
   const askedForCatalog = wantsCatalog(rawText || "");
   if (askedForCatalog) {
@@ -686,26 +917,47 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
   }
 
   // ===============================
-  // ✅ Saludos / mensajes sin intención de pedido
-  // Evita que un 'hola' dispare pedidos o pida DNI/dirección de una
+  // ✅ Si el cliente pregunta por un producto ("tenés galletitas?"), RESPONDEMOS sin tocar el pedido.
   // ===============================
-  const rawNorm = norm(rawText || "");
-  const hasDigits = /\b\d+\b/.test(rawNorm);
-  const isGreetingOnly = /^(hola+|buenas|buenos dias|buenas tardes|buenas noches|hey+|holi+)\b/i.test(rawNorm) && rawNorm.split(" ").filter(Boolean).length <= 3;
-  const looksLikeOrderText =
-    hasDigits ||
-    hasModifyIntent(rawNorm) ||
-    /\b(quiero|qiero|uiero|kiero|necesito|pedido|pedir|mandame|arma(me)?|haceme)\b/i.test(rawNorm);
+  const inquiry = looksLikeInquiry(rawText || "");
+  if (inquiry) {
+    const term = extractInquiryTerm(rawText || "") || rawText || "";
+    const matches = findProductsByTerm(term, products, 8);
 
-  if (isGreetingOnly && !looksLikeOrderText && !asksPaymentMethod(rawText || "") && !isTransferMention(rawText || "")) {
-    await sendMessage(
-      "¡Hola! 👋 Decime qué querés pedir o consultar.\nEj: '2 cocas y 1 galletitas'. Si querés, también te paso promos o el catálogo."
-    );
+    if (matches.length === 0) {
+      await sendMessage(
+        `Ahora mismo no encuentro "${term}" en el stock. Si querés, decime marca/tamaño o pedime el catálogo.`
+      );
+      return true;
+    }
+
+    const active = await prisma.order.findFirst({
+      where: {
+        doctorId: doctor.id,
+        clientId: client.id,
+        status: { in: ["pending", "confirmed"] },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    const options = formatProductOptions(matches);
+    const extra = active
+      ? `\n\nSi querés que te lo agregue al pedido #${active.sequenceNumber}, decime cuántas (ej: "sumar 2 de la opción 1").`
+      : `\n\nSi querés pedir, decime cuántas (ej: "quiero 2 de la opción 1").`;
+
+    await sendMessage(`Sí, tengo estas opciones 👇\n\n${options}${extra}`);
     return true;
   }
 
-  // Si es un cliente nuevo y no tenemos datos mínimos, solo los pedimos cuando hay intención de pedido
-  if ((!client.dni || !client.businessAddress) && looksLikeOrderText) {
+
+  // Si es un cliente nuevo y no tenemos datos mínimos, pedimos DNI y dirección antes de guardar/confirmar pedidos
+  // (para consultas generales o cancelar, no lo bloqueamos)
+  const profileRequiredForThisMessage =
+    action.type === "retail_upsert_order" ||
+    action.type === "retail_confirm_order" ||
+    action.type === "retail_attach_payment_proof";
+
+  if (profileRequiredForThisMessage && (!client.dni || !client.businessAddress)) {
     const missing: string[] = [];
     if (!client.dni) missing.push("DNI");
     if (!client.businessAddress) missing.push("dirección de entrega");
@@ -716,27 +968,36 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
     );
     return true;
   }
-
-  // Si piden cancelar, intentamos cancelar el pendiente más reciente
+  // Si piden cancelar, intentamos cancelar el pedido activo más reciente
+  // ✅ IMPORTANTE: No confiamos en el texto del modelo para esto (evita que diga "no tenés" cuando sí cancelamos)
   if (action.type === "retail_cancel_order") {
-    const pending = await prisma.order.findFirst({
-      where: { doctorId: doctor.id, clientId: client.id, status: "pending" },
+    const active = await prisma.order.findFirst({
+      where: {
+        doctorId: doctor.id,
+        clientId: client.id,
+        status: { in: ["pending", "confirmed"] },
+      },
       include: { items: true },
       orderBy: { createdAt: "desc" },
     });
-    if (pending) {
-      await prisma.order.update({
-        where: { id: pending.id },
-        data: { status: "cancelled" },
-      });
-      await sendMessage(
-        replyToPatient || `Cancelé el pedido #${pending.sequenceNumber}. Avisame si querés armar otro.`
-      );
+
+    if (!active) {
+      await sendMessage("No encontré ningún pedido activo para cancelar. ¿Querés hacer uno nuevo?");
       return true;
     }
-    await sendMessage(replyToPatient || "No encontré un pedido para cancelar.");
+
+    await restockOrderInventory(active);
+    await prisma.order.update({
+      where: { id: active.id },
+      data: { status: "cancelled" },
+    });
+
+    await sendMessage(
+      `Listo ✅ cancelé el pedido #${active.sequenceNumber}. Si querés armar otro, pasame productos y cantidades.`
+    );
     return true;
   }
+
 
   // ===============================
   // ✅ Interceptor “quitar/sacar/borrar” (sin IA)
@@ -816,7 +1077,6 @@ if (awaitingRemove) {
       }
 
       const nextQty2 = existing2.quantity - qtyToRemove;
-      const removedQty2 = Math.min(existing2.quantity, qtyToRemove);
 
       await prisma.$transaction(async (tx) => {
         if (nextQty2 <= 0) {
@@ -825,14 +1085,6 @@ if (awaitingRemove) {
           await tx.orderItem.updateMany({
             where: { orderId: pending.id, productId: match2.id },
             data: { quantity: nextQty2 },
-          });
-        }
-
-        // ✅ Si el pedido ya tenía stock reservado, devolvemos SOLO lo que se quitó
-        if (pending.inventoryDeducted && removedQty2 > 0) {
-          await tx.product.updateMany({
-            where: { id: match2.id, doctorId: doctor.id },
-            data: { quantity: { increment: removedQty2 } },
           });
         }
 
@@ -863,9 +1115,10 @@ if (awaitingRemove) {
   }
 }
 
-    // (No restockeamos todo el pedido acá: devolvemos SOLO lo que se quita dentro de la transacción)
 
-    // Detectar "todas/todo" => borrar completo ese producto
+    await restockOrderInventory(pending);
+
+    // Detectar “todas/todo” => borrar completo ese producto
     const wantsAll =
       /\b(todas?|todo|toda)\b/i.test(removeIncoming) ||
       /\b(todas\s+las|todos\s+los)\b/i.test(removeIncoming);
@@ -940,7 +1193,6 @@ if (awaitingRemove) {
     // Si no dio cantidad explícita, interpretamos “quitame X” como “sacar todas”
     const removeAll = wantsAll || qty == null;
     const removeQty = removeAll ? existing.quantity : qty!;
-    const removedQty = Math.min(existing.quantity, removeQty);
     const nextQty = existing.quantity - removeQty;
 
     await prisma.$transaction(async (tx) => {
@@ -952,14 +1204,6 @@ if (awaitingRemove) {
         await tx.orderItem.updateMany({
           where: { orderId: pending.id, productId: match.id },
           data: { quantity: nextQty },
-        });
-      }
-
-      // ✅ Si el pedido ya tenía stock reservado, devolvemos SOLO lo que se quitó
-      if (pending.inventoryDeducted && removedQty > 0) {
-        await tx.product.updateMany({
-          where: { id: match.id, doctorId: doctor.id },
-          data: { quantity: { increment: removedQty } },
         });
       }
 
@@ -1354,29 +1598,12 @@ if (awaitingRemove) {
       return true;
     }
 
-    // ✅ Si el cliente ya confirmó antes, no repetimos
-    if (pending.customerConfirmed) {
+    // Ya descontado => no repetir
+    if (pending.inventoryDeducted) {
       const summary =
         pending.items.map((it) => `• ${it.quantity} x ${it.product.name}`).join("\n") || "Pedido vacío";
       await sendMessage(
-        `Ya lo tengo confirmado ✅\n\nPedido #${pending.sequenceNumber} (estado: Falta revisión):\n${summary}\nTotal: $${pending.totalAmount}`
-      );
-      return true;
-    }
-
-    // ✅ Si el stock ya estaba reservado (inventoryDeducted=true), SOLO marcamos confirmación del cliente
-    if (pending.inventoryDeducted) {
-      const confirmed = await prisma.order.update({
-        where: { id: pending.id },
-        data: { customerConfirmed: true, customerConfirmedAt: new Date() },
-        include: { items: { include: { product: true } } },
-      });
-
-      const summary =
-        confirmed.items.map((it) => `• ${it.quantity} x ${it.product.name}`).join("\n") || "Pedido vacío";
-
-      await sendMessage(
-        `Listo ✅ lo tengo confirmado.\n\nPedido #${confirmed.sequenceNumber} (estado: Falta revisión):\n${summary}\nTotal: $${confirmed.totalAmount}`
+        `Ya esta enviado ✅.\n\nPedido #${pending.sequenceNumber}:\n${summary}\nTotal: $${pending.totalAmount}`
       );
       return true;
     }
@@ -1462,7 +1689,7 @@ if (awaitingRemove) {
       confirmed?.items.map((it) => `• ${it.quantity} x ${it.product.name}`).join("\n") || "Pedido vacío";
 
     await sendMessage(
-      `Listo ✅ lo tengo confirmado.\n\n` +
+      `Listo ✅ envie tu pedido.\n\n` +
         `Pedido #${confirmed?.sequenceNumber} (estado: Falta revisión):\n${summary}\n` +
         `Total: $${confirmed?.totalAmount ?? 0}`
     );
@@ -1477,18 +1704,15 @@ if (awaitingRemove) {
   let items = Array.isArray(action.items) ? action.items : [];
 
   items = items.filter((it: any) => {
-    const a = (it?.name || "").toString();
-    const b = (it?.normalizedName || "").toString();
-    return appearsInMessage(a, rawText) || appearsInMessage(b, rawText);
+    const candidate = (it?.normalizedName || it?.name || "").toString();
+    return appearsInMessage(candidate, rawText);
   });
 
   // Fallback robusto: capturar patrones "n producto" incluso si la IA omitió alguno
   const fallbackItems: Array<{ name: string; quantity: number }> = [];
   const fallbackRemovals: Array<{ name: string; quantity: number }> = [];
   const tokens = norm(rawText || "");
-  const matches = Array.from(
-    tokens.matchAll(/\b(\d+)\s*(?:x|×)?\s*([a-z0-9][a-z0-9\s]{1,40}?)(?=(?:\s*(?:,|y|&|\+)\s*\d+|\s+\d+\s+|$))/gi)
-  ).slice(0, 12);
+  const matches = Array.from(tokens.matchAll(/\b(\d+)\s*(?:x|×)?\s*([a-z0-9][a-z0-9\s]{1,40}?)(?=(?:\s*(?:,|y|&|\+)\s*\d+|$))/gi)).slice(0, 12);
   for (const m of matches) {
     const qty = Number(m[1]);
     const candidateName = (m[2] || "").trim();
@@ -1500,12 +1724,12 @@ if (awaitingRemove) {
   // Detectar patrones de quitar/sacar para mapear a op=remove sin bloquear el resto del mensaje
   const removeMatches = Array.from(
     tokens.matchAll(
-      /\b(?:quit(?:a|ar|ame)?|sac(?:a|ar|ame)?|elimin(?:a|ar|ame)?|borr(?:a|ar|ame)?|sin)\s*(?:(\d+)\s*)?([a-z0-9][a-z0-9\s]{1,40}?)(?=(?:\s*(?:,|y|&|\+)\s*(?:quit|sac|elimin|borr|sin|\d+)|$))/gi
+      /\b(quit(a|ar|ame)|sac(a|ar|ame)|elimin(a|ar|ame)|borr(a|ar|ame)|sin)\s+(\d+)?\s*([a-z0-9][a-z0-9\s]{1,40})/gi
     )
   ).slice(0, 8);
   for (const m of removeMatches) {
-    const qtyRaw = m[1];
-    const nameRaw = (m[2] || "").trim();
+    const qtyRaw = m[6];
+    const nameRaw = (m[7] || "").trim();
     const qty = qtyRaw ? Number(qtyRaw) : 1;
     if (nameRaw) {
       fallbackRemovals.push({ name: nameRaw, quantity: qty > 0 ? qty : 1 });
@@ -1576,14 +1800,14 @@ if (awaitingRemove) {
     return true;
   }
 
-  const missingProducts: string[] = [];
+  const missingProducts: Array<{ term: string; quantity: number; op?: string }> = [];
   const resolvedItems: Array<{ productId: number; quantity: number; name: string; op?: string }> = [];
 
   for (const item of normalized) {
     const candidateName = (item as any).normalizedName || item.name;
     const { product: match, score } = matchProductName(candidateName, products);
     if (!match || score <= 0) {
-      missingProducts.push(item.name);
+      missingProducts.push({ term: item.name, quantity: item.quantity, op: (item as any).op });
       continue;
     }
     resolvedItems.push({
@@ -1594,32 +1818,51 @@ if (awaitingRemove) {
     });
   }
 
-  // ✅ Si faltó mapear algún producto, NO guardamos todavía
+  // ✅ Si faltó mapear algún producto, NO guardamos todavía.
+  // En vez de pedir "nombre exacto" seco, sugerimos opciones (nombre + precio + stock)
+  // y guardamos estado para seguir el hilo (el próximo mensaje "2" no se pierde).
   if (missingProducts.length > 0) {
-    // Sugerimos opciones cercanas en el catálogo (ej: "jugo" -> listar jugos)
-    const suggestions: string[] = [];
-    for (const miss of missingProducts) {
-      const normMiss = miss.toLowerCase();
-      const candidates = products
-        .filter((p) => p.name.toLowerCase().includes(normMiss))
-        .slice(0, 5)
-        .map((p) => p.name);
-      if (candidates.length) {
-        suggestions.push(`${miss}: ${candidates.join(", ")}`);
-      }
+    const miss = missingProducts[0];
+    const term = miss.term;
+    const qty = miss.quantity;
+
+    const candidates = findProductsByTerm(term, products, 6);
+    if (candidates.length === 0) {
+      await sendMessage(
+        `No pude reconocer: ${term}. Decime el nombre exacto como figura en el stock o pedime el catálogo.`
+      );
+      return true;
     }
 
+    // Guardar estado para el próximo mensaje
+    await saveRetailConversationState(client.id, {
+      awaiting: {
+        kind: "choose_product",
+        term,
+        candidates: candidates.map((p: any) => ({ productId: p.id, name: p.name })),
+        desiredQuantity: qty,
+        op: (miss.op as any) || "add",
+        createdAt: Date.now(),
+      },
+    });
+
+    const options = formatProductOptions(candidates);
+    const qtyText = qty ? ` (vos habías puesto ${qty})` : "";
     await sendMessage(
-      `No pude reconocer: ${missingProducts.join(", ")}.` +
-        (suggestions.length ? ` Opciones que tengo: ${suggestions.join(" · ")}.` : "") +
-        ` Decime el nombre exacto como figura en el stock (ej: "yerba playadito 1kg").`
+      `Cuando decís "${term}" ¿a cuál te referís?${qtyText}
+
+${options}
+
+Respondeme con el número de opción (ej: "1")` +
+        (qty ? ` o "1 x ${qty}".` : ` y la cantidad (ej: "1 x 2").`)
     );
     return true;
   }
 
+
   if (resolvedItems.length === 0) {
     await sendMessage(
-      `No pude encontrar estos productos en el stock: ${missingProducts.join(
+      `No pude encontrar estos productos en el stock: ${missingProducts.map((m) => m.term).join(
         ", "
       )}. Decime nombres más precisos o reemplazos (ej: "yerba playadito 1kg", "coca 1.5L").`
     );
@@ -1657,17 +1900,16 @@ if (awaitingRemove) {
   }
 
   // "sumar/agregar" => suma cantidades. Si no, setea la cantidad del producto mencionado.
-  const rawNormForOps = norm(rawText || "");
   let addMode =
-    /\b(sum(ar|ame|a)?|agreg(ar|ame|a|alas)?|anad(ir|ime|i)?|añad(ir|ime|i)?|mas|\+)\b/i.test(rawNormForOps);
+    action.mode === "append" || /\b(sum(ar|ame|á)|agreg(ar|ame|á|alas)|añad(ir|ime|í)|mas|\+)\b/i.test(rawText);
 
   // Si el cliente dice "quiero/armame/haceme" con lista completa y hay un pendiente,
   // preferimos reemplazar cantidades en vez de sumar para evitar duplicar.
   const wantsFreshReplace =
     pendingOrders.length > 0 &&
     resolvedItems.length > 0 &&
-    /\b(quiero|qiero|uiero|kiero|armame|arma|haceme|hace(me)?|pasame|pedido nuevo|arranca|empeza|empezar)\b/i.test(rawNormForOps) &&
-    !/\b(sum(ar|ame|a)?|agreg(ar|ame|a|alas)?|anad(ir|ime|i)?|añad(ir|ime|i)?|mas|\+)\b/i.test(rawNormForOps);
+    /\b(quiero|armame|arma|haceme|hace(me)?|pasame|pedido nuevo|arranca|empeza|empezar)\b/i.test(rawText || "") &&
+    !/\b(sum(ar|ame|á)|agreg(ar|ame|á|alas)|añad(ir|ime|í)|mas|\+)\b/i.test(rawText || "");
 
   const target = pendingOrders[0] ?? null;
   const targetOrderId = target?.id ?? null;
@@ -1855,7 +2097,7 @@ if (awaitingRemove) {
 
   await sendMessage(
     `${prefix}Revisá si está bien 👇\n\n` +
-      `Pedido #${order.sequenceNumber} (Enviado):\n${summary}\nTotal: $${order.totalAmount}\n\n` +
+      `Pedido #${order.sequenceNumber} (En revisión):\n${summary}\nTotal: $${order.totalAmount}\n\n` +
       `Si está OK respondé *CONFIRMAR* (o OK / dale / listo).\n` +
       `Para sumar: "sumar 1 coca". Para quitar: "quitar coca". Para cambiar: "cambiar coca a 3".`
   );

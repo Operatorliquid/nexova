@@ -55,6 +55,8 @@ Reglas de comportamiento:
 - Si el cliente cancela todo, usá "type": "retail_cancel_order".
 - Si el mensaje es confuso, usá "type": "ask_clarification" y en "reply" pedí aclaración concreta.
 - Si solo pregunta precios, horarios, stock o info general, usá "type": "general".
+- MUY IMPORTANTE: ante preguntas tipo "¿tenés X?", "¿hay X?", "precio de X?" NO modifiques pedidos aunque haya uno pendiente.
+  Respondé con opciones (nombre + precio + stock) y preguntá si lo quiere agregar (pero acción: "general").
 - Si piden datos para pagar/transferir (alias, CBU/CVU, "a dónde transfiero", "pasame el alias", "a dónde te mando la plata", "cómo te pago"), respondé con el Alias/CBU del negocio que viene en el contexto (Info del negocio). Acción: "general". Si NO hay alias/cbu cargado en el contexto, decí: "Todavía no tengo cargado el alias/CBU acá. Decime y te lo paso."
 - Si el cliente dice que transfirió/pagó/depositó pero NO adjunta comprobante en este mensaje, NO confirmes pago ni digas que lo recibiste: pedí el comprobante/captura de la transferencia y no cambies estados. Acción: "general" o "ask_clarification" con ese pedido.
 - Si te preguntan dirección/depósito/local: respondé la dirección directo y ofrecé ubicación. NO preguntes ‘¿querés que te confirme la dirección?.
@@ -71,7 +73,7 @@ Precios / promos:
 - Nunca preguntes si agregar a pedido actual o crear uno nuevo. Si el cliente pide productos/cantidades, devolvé retail_upsert_order con SOLO los items de ESTE mensaje. El backend decide si edita o crea según si hay pending.
 - Si el usuario pide QUITAR/SACAR/BORRAR un producto, usá op="remove" y NO pidas cantidades.
 - Si el cliente pide algo genérico ("5 jugos", "agregá yogures") sin marca/sabor, NO inventes productos: devolvé ask_clarification con un reply pidiendo que elija y sugerí opciones del catálogo similar.
-- Si hay un pedido pendiente en contexto, asumí que las cantidades pedidas van para ese pedido en curso (no crees uno nuevo en la respuesta, solo listá los items mencionados).
+- Si hay un pedido pendiente en contexto y el mensaje tiene verbo de compra (quiero/dame/sumar/etc) o cantidades, asumí que va para ese pedido en curso.
 
 Mensajes raros / fuera de tema:
 - Si te mandan algo que NO es un pedido ni una consulta del negocio, intentá inferir qué necesitan (ej: saludo, "se me cortó", "no me llegó", "cómo pago", etc.).
@@ -93,33 +95,6 @@ export async function runRetailAgent(
   openai: OpenAI | null
 ): Promise<AgentExecutionResult | null> {
   if (!openai) return null;
-
-  // ===============================
-  // ✅ Fast-path: saludo / charla corta
-  // Evita gastar tokens y evita que un 'hola' termine creando un pedido por error
-  // ===============================
-  const raw = (ctx.text || "").trim();
-  const norm = raw
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  const greetingOnlyFast =
-    /^(hola+|buenas|buenos dias|buenas tardes|buenas noches|hey+|holi+)\b/i.test(norm) &&
-    norm.split(" ").filter(Boolean).length <= 3;
-  const hasDigits = /\b\d+\b/.test(norm);
-
-  if (greetingOnlyFast && !hasDigits) {
-    const reply = "¡Hola! 👋 Decime qué querés pedir o consultar.\nEj: '2 cocas y 1 galletitas'.";
-    return {
-      replyToPatient: reply,
-      action: { type: "general", reply },
-      profileUpdates: null,
-    };
-  }
 
   try {
     const productCatalog = (ctx as any).productCatalog;
