@@ -94,6 +94,33 @@ export async function runRetailAgent(
 ): Promise<AgentExecutionResult | null> {
   if (!openai) return null;
 
+  // ===============================
+  // ✅ Fast-path: saludo / charla corta
+  // Evita gastar tokens y evita que un 'hola' termine creando un pedido por error
+  // ===============================
+  const raw = (ctx.text || "").trim();
+  const norm = raw
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const greetingOnlyFast =
+    /^(hola+|buenas|buenos dias|buenas tardes|buenas noches|hey+|holi+)\b/i.test(norm) &&
+    norm.split(" ").filter(Boolean).length <= 3;
+  const hasDigits = /\b\d+\b/.test(norm);
+
+  if (greetingOnlyFast && !hasDigits) {
+    const reply = "¡Hola! 👋 Decime qué querés pedir o consultar.\nEj: '2 cocas y 1 galletitas'.";
+    return {
+      replyToPatient: reply,
+      action: { type: "general", reply },
+      profileUpdates: null,
+    };
+  }
+
   try {
     const productCatalog = (ctx as any).productCatalog;
     const activePromotions = (ctx as any).activePromotions || (ctx as any).promotions;

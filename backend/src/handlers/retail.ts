@@ -478,6 +478,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
   const products = await prisma.product.findMany({
     where: { doctorId: doctor.id },
     orderBy: { name: "asc" },
+    include: { tags: { select: { label: true } } },
   });
 
   const officeDaysSet = parseOfficeDays((doctor as any).officeDays ?? null);
@@ -684,8 +685,27 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
     return true;
   }
 
-  // Si es un cliente nuevo y no tenemos datos mínimos, pedimos DNI y dirección antes de seguir
-  if (!client.dni || !client.businessAddress) {
+  // ===============================
+  // ✅ Saludos / mensajes sin intención de pedido
+  // Evita que un 'hola' dispare pedidos o pida DNI/dirección de una
+  // ===============================
+  const rawNorm = norm(rawText || "");
+  const hasDigits = /\b\d+\b/.test(rawNorm);
+  const isGreetingOnly = /^(hola+|buenas|buenos dias|buenas tardes|buenas noches|hey+|holi+)\b/i.test(rawNorm) && rawNorm.split(" ").filter(Boolean).length <= 3;
+  const looksLikeOrderText =
+    hasDigits ||
+    hasModifyIntent(rawNorm) ||
+    /\b(quiero|qiero|uiero|kiero|necesito|pedido|pedir|mandame|arma(me)?|haceme)\b/i.test(rawNorm);
+
+  if (isGreetingOnly && !looksLikeOrderText && !asksPaymentMethod(rawText || "") && !isTransferMention(rawText || "")) {
+    await sendMessage(
+      "¡Hola! 👋 Decime qué querés pedir o consultar.\nEj: '2 cocas y 1 galletitas'. Si querés, también te paso promos o el catálogo."
+    );
+    return true;
+  }
+
+  // Si es un cliente nuevo y no tenemos datos mínimos, solo los pedimos cuando hay intención de pedido
+  if ((!client.dni || !client.businessAddress) && looksLikeOrderText) {
     const missing: string[] = [];
     if (!client.dni) missing.push("DNI");
     if (!client.businessAddress) missing.push("dirección de entrega");
@@ -705,7 +725,6 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {
       orderBy: { createdAt: "desc" },
     });
     if (pending) {
-      await restockOrderInventory(pending);
       await prisma.order.update({
         where: { id: pending.id },
         data: { status: "cancelled" },
@@ -797,6 +816,7 @@ if (awaitingRemove) {
       }
 
       const nextQty2 = existing2.quantity - qtyToRemove;
+      const removedQty2 = Math.min(existing2.quantity, qtyToRemove);
 
       await prisma.$transaction(async (tx) => {
         if (nextQty2 <= 0) {
@@ -805,6 +825,14 @@ if (awaitingRemove) {
           await tx.orderItem.updateMany({
             where: { orderId: pending.id, productId: match2.id },
             data: { quantity: nextQty2 },
+          });
+        }
+
+        // ✅ Si el pedido ya tenía stock reservado, devolvemos SOLO lo que se quitó
+        if (pending.inventoryDeducted && removedQty2 > 0) {
+          await tx.product.updateMany({
+            where: { id: match2.id, doctorId: doctor.id },
+            data: { quantity: { increment: removedQty2 } },
           });
         }
 
@@ -835,10 +863,9 @@ if (awaitingRemove) {
   }
 }
 
+    // (No restockeamos todo el pedido acá: devolvemos SOLO lo que se quita dentro de la transacción)
 
-    await restockOrderInventory(pending);
-
-    // Detectar “todas/todo” => borrar completo ese producto
+    // Detectar "todas/todo" => borrar completo ese producto
     const wantsAll =
       /\b(todas?|todo|toda)\b/i.test(removeIncoming) ||
       /\b(todas\s+las|todos\s+los)\b/i.test(removeIncoming);
@@ -913,6 +940,7 @@ if (awaitingRemove) {
     // Si no dio cantidad explícita, interpretamos “quitame X” como “sacar todas”
     const removeAll = wantsAll || qty == null;
     const removeQty = removeAll ? existing.quantity : qty!;
+    const removedQty = Math.min(existing.quantity, removeQty);
     const nextQty = existing.quantity - removeQty;
 
     await prisma.$transaction(async (tx) => {
@@ -924,6 +952,14 @@ if (awaitingRemove) {
         await tx.orderItem.updateMany({
           where: { orderId: pending.id, productId: match.id },
           data: { quantity: nextQty },
+        });
+      }
+
+      // ✅ Si el pedido ya tenía stock reservado, devolvemos SOLO lo que se quitó
+      if (pending.inventoryDeducted && removedQty > 0) {
+        await tx.product.updateMany({
+          where: { id: match.id, doctorId: doctor.id },
+          data: { quantity: { increment: removedQty } },
         });
       }
 
@@ -1318,12 +1354,29 @@ if (awaitingRemove) {
       return true;
     }
 
-    // Ya descontado => no repetir
-    if (pending.inventoryDeducted) {
+    // ✅ Si el cliente ya confirmó antes, no repetimos
+    if (pending.customerConfirmed) {
       const summary =
         pending.items.map((it) => `• ${it.quantity} x ${it.product.name}`).join("\n") || "Pedido vacío";
       await sendMessage(
-        `Ya esta enviado ✅.\n\nPedido #${pending.sequenceNumber}:\n${summary}\nTotal: $${pending.totalAmount}`
+        `Ya lo tengo confirmado ✅\n\nPedido #${pending.sequenceNumber} (estado: Falta revisión):\n${summary}\nTotal: $${pending.totalAmount}`
+      );
+      return true;
+    }
+
+    // ✅ Si el stock ya estaba reservado (inventoryDeducted=true), SOLO marcamos confirmación del cliente
+    if (pending.inventoryDeducted) {
+      const confirmed = await prisma.order.update({
+        where: { id: pending.id },
+        data: { customerConfirmed: true, customerConfirmedAt: new Date() },
+        include: { items: { include: { product: true } } },
+      });
+
+      const summary =
+        confirmed.items.map((it) => `• ${it.quantity} x ${it.product.name}`).join("\n") || "Pedido vacío";
+
+      await sendMessage(
+        `Listo ✅ lo tengo confirmado.\n\nPedido #${confirmed.sequenceNumber} (estado: Falta revisión):\n${summary}\nTotal: $${confirmed.totalAmount}`
       );
       return true;
     }
@@ -1409,7 +1462,7 @@ if (awaitingRemove) {
       confirmed?.items.map((it) => `• ${it.quantity} x ${it.product.name}`).join("\n") || "Pedido vacío";
 
     await sendMessage(
-      `Listo ✅ envie tu pedido.\n\n` +
+      `Listo ✅ lo tengo confirmado.\n\n` +
         `Pedido #${confirmed?.sequenceNumber} (estado: Falta revisión):\n${summary}\n` +
         `Total: $${confirmed?.totalAmount ?? 0}`
     );
@@ -1424,15 +1477,18 @@ if (awaitingRemove) {
   let items = Array.isArray(action.items) ? action.items : [];
 
   items = items.filter((it: any) => {
-    const candidate = (it?.normalizedName || it?.name || "").toString();
-    return appearsInMessage(candidate, rawText);
+    const a = (it?.name || "").toString();
+    const b = (it?.normalizedName || "").toString();
+    return appearsInMessage(a, rawText) || appearsInMessage(b, rawText);
   });
 
   // Fallback robusto: capturar patrones "n producto" incluso si la IA omitió alguno
   const fallbackItems: Array<{ name: string; quantity: number }> = [];
   const fallbackRemovals: Array<{ name: string; quantity: number }> = [];
   const tokens = norm(rawText || "");
-  const matches = Array.from(tokens.matchAll(/\b(\d+)\s+([a-z0-9][a-z0-9\s]{1,40})/gi)).slice(0, 8);
+  const matches = Array.from(
+    tokens.matchAll(/\b(\d+)\s*(?:x|×)?\s*([a-z0-9][a-z0-9\s]{1,40}?)(?=(?:\s*(?:,|y|&|\+)\s*\d+|\s+\d+\s+|$))/gi)
+  ).slice(0, 12);
   for (const m of matches) {
     const qty = Number(m[1]);
     const candidateName = (m[2] || "").trim();
@@ -1444,12 +1500,12 @@ if (awaitingRemove) {
   // Detectar patrones de quitar/sacar para mapear a op=remove sin bloquear el resto del mensaje
   const removeMatches = Array.from(
     tokens.matchAll(
-      /\b(quit(a|ar|ame)|sac(a|ar|ame)|elimin(a|ar|ame)|borr(a|ar|ame)|sin)\s+(\d+)?\s*([a-z0-9][a-z0-9\s]{1,40})/gi
+      /\b(?:quit(?:a|ar|ame)?|sac(?:a|ar|ame)?|elimin(?:a|ar|ame)?|borr(?:a|ar|ame)?|sin)\s*(?:(\d+)\s*)?([a-z0-9][a-z0-9\s]{1,40}?)(?=(?:\s*(?:,|y|&|\+)\s*(?:quit|sac|elimin|borr|sin|\d+)|$))/gi
     )
   ).slice(0, 8);
   for (const m of removeMatches) {
-    const qtyRaw = m[6];
-    const nameRaw = (m[7] || "").trim();
+    const qtyRaw = m[1];
+    const nameRaw = (m[2] || "").trim();
     const qty = qtyRaw ? Number(qtyRaw) : 1;
     if (nameRaw) {
       fallbackRemovals.push({ name: nameRaw, quantity: qty > 0 ? qty : 1 });
@@ -1601,16 +1657,17 @@ if (awaitingRemove) {
   }
 
   // "sumar/agregar" => suma cantidades. Si no, setea la cantidad del producto mencionado.
+  const rawNormForOps = norm(rawText || "");
   let addMode =
-    action.mode === "merge" || /\b(sum(ar|ame|á)|agreg(ar|ame|á|alas)|añad(ir|ime|í)|mas|\+)\b/i.test(rawText);
+    /\b(sum(ar|ame|a)?|agreg(ar|ame|a|alas)?|anad(ir|ime|i)?|añad(ir|ime|i)?|mas|\+)\b/i.test(rawNormForOps);
 
   // Si el cliente dice "quiero/armame/haceme" con lista completa y hay un pendiente,
   // preferimos reemplazar cantidades en vez de sumar para evitar duplicar.
   const wantsFreshReplace =
     pendingOrders.length > 0 &&
     resolvedItems.length > 0 &&
-    /\b(quiero|armame|arma|haceme|hace(me)?|pasame|pedido nuevo|arranca|empeza|empezar)\b/i.test(rawText || "") &&
-    !/\b(sum(ar|ame|á)|agreg(ar|ame|á|alas)|añad(ir|ime|í)|mas|\+)\b/i.test(rawText || "");
+    /\b(quiero|qiero|uiero|kiero|armame|arma|haceme|hace(me)?|pasame|pedido nuevo|arranca|empeza|empezar)\b/i.test(rawNormForOps) &&
+    !/\b(sum(ar|ame|a)?|agreg(ar|ame|a|alas)?|anad(ir|ime|i)?|añad(ir|ime|i)?|mas|\+)\b/i.test(rawNormForOps);
 
   const target = pendingOrders[0] ?? null;
   const targetOrderId = target?.id ?? null;
