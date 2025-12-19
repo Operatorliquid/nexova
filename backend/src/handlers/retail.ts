@@ -1064,6 +1064,28 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
     return true;
   }
 
+  // Pregunta de ubicación: siempre responder directo y limpiar estados anteriores
+  if (isLocationQuestion(msgText)) {
+    await clearRetailAwaiting(client.id);
+    const addr =
+      (doctor as any).businessAddress ||
+      (doctor as any).clinicAddress ||
+      (doctor as any).officeAddress ||
+      (doctor as any).address ||
+      null;
+    if (addr) {
+      await sendMessage(`Estamos en ${addr}. ¿Querés que te comparta la ubicación?`);
+      await setRetailAwaiting(client.id, {
+        kind: "location_offer",
+        createdAt: Date.now(),
+        prompt: "¿Querés que te comparta la ubicación?",
+      });
+    } else {
+      await sendMessage("Estamos operando online. Si necesitás retirar, avisame y te paso la dirección.");
+    }
+    return true;
+  }
+
   // ===============================
   // ✅ Seguir el hilo de preguntas directas (comprobante, catálogo, ubicación, cancelar)
   // ===============================
@@ -1835,26 +1857,6 @@ if (awaitingRemove) {
 
       return true;
     }
-  }
-
-  if (isLocationQuestion(msgText)) {
-    const addr =
-      (doctor as any).businessAddress ||
-      (doctor as any).clinicAddress ||
-      (doctor as any).officeAddress ||
-      (doctor as any).address ||
-      null;
-    if (addr) {
-      await sendMessage(`Estamos en ${addr}. ¿Querés que te comparta la ubicación?`);
-      await setRetailAwaiting(client.id, {
-        kind: "location_offer",
-        createdAt: Date.now(),
-        prompt: "¿Querés que te comparta la ubicación?",
-      });
-    } else {
-    await sendMessage("Estamos operando online. Si necesitás retirar, avisame y te paso la dirección.");
-    }
-    return true;
   }
 
   if (awaiting?.kind === "quantity_needed") {
