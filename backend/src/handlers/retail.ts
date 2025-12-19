@@ -2454,10 +2454,10 @@ Respondeme con el número de opción (ej: "1")` +
 
   // Elegir pedido objetivo respetando el estado conversacional (orderId/sequence)
   let target = pendingOrders[0] ?? null;
-  if (awaiting?.orderId) {
+  if (awaiting && "orderId" in awaiting && awaiting.orderId) {
     const found = pendingOrders.find((o) => o.id === awaiting.orderId);
     if (found) target = found;
-  } else if (awaiting?.orderSequence) {
+  } else if (awaiting && "orderSequence" in awaiting && awaiting.orderSequence) {
     const found = pendingOrders.find((o) => o.sequenceNumber === awaiting.orderSequence);
     if (found) target = found;
   }
