@@ -119,7 +119,13 @@ const productSearchText = (p: any) =>
 const findProductsByTerm = (term: string, products: any[], limit = 6) => {
   const q = norm(term || "");
   if (!q) return [];
-  const tokens = q.split(" ").filter((w) => w.length >= 3);
+  const tokens = q
+    .split(" ")
+    .filter((w) => w.length >= 3 && !["cual", "cuales", "que"].includes(w));
+
+  const beveragePattern =
+    /(bebid|gaseos|refresc|soda|cola|coca|pepsi|sprite|fanta|agua|jugo|cerveza|vino|fernet|aperitiv|energ|tonic)/i;
+  const isBeverageQuery = beveragePattern.test(q);
 
   const scored = products
     .map((p) => {
@@ -137,6 +143,12 @@ const findProductsByTerm = (term: string, products: any[], limit = 6) => {
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .map((x) => x.p);
+
+  if (scored.length === 0 && isBeverageQuery) {
+    return products
+      .filter((p) => beveragePattern.test(productSearchText(p)))
+      .slice(0, limit);
+  }
 
   return scored;
 };
