@@ -422,6 +422,7 @@ const isYes = (txt: string) => {
 const isTransferMention = (raw: string) => {
   const t = normLite(raw || "");
   if (!t) return false;
+  if (isLocationQuestion(raw || "")) return false; // evitar confundir "depósito" de ubicación con pago/deposito bancario
   return (
     /\btransfe/.test(t) ||
     /\btransferenc/.test(t) ||
