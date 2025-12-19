@@ -510,7 +510,9 @@ export async function assignLatestUnassignedProofToOrder(params: {
   if (!target) return false;
 
   const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
-  const latestProof = await prisma.paymentProof.findFirst({
+
+  // Tomamos primero el más reciente en los últimos 10 minutos; si no hay, hacemos fallback al último sin asignar.
+  let latestProof = await prisma.paymentProof.findFirst({
     where: {
       doctorId,
       clientId,
@@ -527,6 +529,25 @@ export async function assignLatestUnassignedProofToOrder(params: {
       amount: true,
     },
   });
+
+  if (!latestProof) {
+    latestProof = await prisma.paymentProof.findFirst({
+      where: {
+        doctorId,
+        clientId,
+        orderId: null,
+        status: { in: [PaymentProofStatus.unassigned, PaymentProofStatus.duplicate] },
+      },
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        fileUrl: true,
+        fileName: true,
+        contentType: true,
+        amount: true,
+      },
+    });
+  }
 
   if (!latestProof) return false;
 
