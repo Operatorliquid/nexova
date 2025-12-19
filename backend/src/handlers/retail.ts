@@ -175,7 +175,54 @@ type RetailConversationState = {
         candidates: Array<{ productId: number; name: string }>;
         desiredQuantity?: number;
         op?: "add" | "set";
+        orderSequence?: number | null;
+        orderId?: number | null;
         createdAt: number;
+      }
+    | {
+        kind: "proof_confirmation";
+        candidateSeq: number | null;
+        createdAt: number;
+        prompt?: string;
+      }
+    | {
+        kind: "catalog_offer";
+        createdAt: number;
+        prompt?: string;
+      }
+    | {
+        kind: "location_offer";
+        createdAt: number;
+        prompt?: string;
+      }
+    | {
+        kind: "cancel_confirmation";
+        orderSequence?: number | null;
+        createdAt: number;
+        prompt?: string;
+      }
+    | {
+        kind: "quantity_needed";
+        productName: string;
+        candidates?: Array<{ productId: number; name: string }>;
+        orderSequence?: number | null;
+        orderId?: number | null;
+        op?: "add" | "set" | "remove";
+        createdAt: number;
+        prompt?: string;
+      }
+    | {
+        kind: "stock_replacement";
+        missing: Array<{ productId: number; name: string; need: number; have: number }>;
+        orderSequence?: number | null;
+        orderId?: number | null;
+        createdAt: number;
+        prompt?: string;
+      }
+    | {
+        kind: "promo_offer";
+        createdAt: number;
+        prompt?: string;
       }
     | null;
 };
@@ -210,8 +257,30 @@ async function saveRetailConversationState(clientId: number, state: RetailConver
 async function clearRetailAwaiting(clientId: number) {
   const st = await loadRetailConversationState(clientId);
   if (!st.awaiting) return;
+  const kind = (st.awaiting as any)?.kind;
   st.awaiting = null;
   await saveRetailConversationState(clientId, st);
+  console.log("[Retail Awaiting] cleared", { clientId, kind });
+}
+
+function logAwaitingConsume(kind: string, msg: string) {
+  console.log("[Retail Awaiting] consume", { kind, msg });
+}
+
+async function setRetailAwaiting(
+  clientId: number,
+  awaiting: NonNullable<RetailConversationState["awaiting"]>
+) {
+  const st = await loadRetailConversationState(clientId);
+  st.awaiting = awaiting;
+  await saveRetailConversationState(clientId, st);
+  console.log("[Retail Awaiting] set", {
+    clientId,
+    kind: awaiting.kind,
+    prompt: (awaiting as any).prompt,
+    orderSequence: (awaiting as any).orderSequence,
+    orderId: (awaiting as any).orderId,
+  });
 }
 
 
@@ -400,6 +469,42 @@ const isNo = (txt: string) => {
   );
 };
 
+const isSoftAck = (txt: string) => {
+  const t = norm(txt);
+  return /^(ok|oka|okey|dale|listo|bueno|buenisimo|buenísimo|barbaro|bárbaro|genial|gracias|joya|perfecto|entendido)$/.test(
+    t
+  );
+};
+
+type ParsedIntentItem = {
+  name: string;
+  quantity: number;
+  op?: "add" | "remove" | "set";
+};
+
+const extractIntentItems = (raw: string): ParsedIntentItem[] => {
+  const text = raw.toLowerCase();
+  const segments = text.split(/(?:,| y | e )/i).map((s) => s.trim()).filter(Boolean);
+  const items: ParsedIntentItem[] = [];
+  for (const seg of segments) {
+    const isRemove = /\b(quit|sac|elimin|borr|sin)\b/.test(seg);
+    const isSet = /\bdej(a|ar|alo|arlo)\b/.test(seg);
+    const op: "add" | "remove" | "set" = isRemove ? "remove" : isSet ? "set" : "add";
+
+    const qtyMatch = seg.match(/\b(\d+)\b/);
+    const qty = qtyMatch ? Number(qtyMatch[1]) : 1;
+    const name = seg
+      .replace(/\b(quiero|sum[ao]?|agreg[ao]?|pone|pon[ée]|deja|dej[aá]|quit[ao]?|sac[ao]?|elimina|borra|sin)\b/gi, "")
+      .replace(/\b\d+\b/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (name) {
+      items.push({ name, quantity: qty, op });
+    }
+  }
+  return items;
+};
+
 // ✅ “eh?/que?/no entiendo” (respuesta de confusión)
 const isConfusion = (txt: string) => {
   const t = norm(txt);
@@ -456,6 +561,16 @@ function formatAliasReply(businessAlias: string) {
     ? `Dale 🙌 Te paso el CBU/CVU:\n*${clean}*\n\nCuando transfieras, avisame y si querés mandá el comprobante.`
     : `Dale 🙌 Mi alias es:\n*${clean}*\n\nCuando transfieras, avisame y si querés mandá el comprobante.`;
 }
+
+const isLocationQuestion = (raw: string) => {
+  const t = norm(raw || "");
+  if (!t) return false;
+  const hasWhere =
+    /\b(donde|dónde|ubicacion|ubicación|ubicado|queda|quedan|direccion|dirección)\b/.test(t);
+  const hasPlace =
+    /\b(local|deposito|dep[oó]sito|sucursal|tienda|negocio|stock|almacen|almac[eé]n)\b/.test(t);
+  return hasWhere && hasPlace;
+};
 
 function extractOrderSeqFromText(text: string): number | null {
   if (!text) return null;
@@ -843,15 +958,297 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
   }
 
   await maybeUpdateProfile();
+
+  // Último mensaje del bot (para seguir el hilo)
+  const lastBotMsgRow = await prisma.message.findFirst({
+    where: {
+      doctorId: doctor.id,
+      retailClientId: client.id,
+      direction: "outgoing",
+      body: { not: null },
+    },
+    orderBy: { createdAt: "desc" },
+    select: { body: true },
+  });
+  const lastBotMsg = lastBotMsgRow?.body || "";
+
+  const lastBotAskedProof = /comprobante|captura de la transferencia|mand[aá] el comprobante/i.test(
+    lastBotMsg
+  );
+  const candidateSeq = parseProofCandidateFromLastBotMessage(lastBotMsg);
+
+  const conv = await loadRetailConversationState(client.id);
+  const nowTs = Date.now();
+  const awaitingValid =
+    conv.awaiting && typeof (conv.awaiting as any).createdAt === "number"
+      ? nowTs - (conv.awaiting as any).createdAt <= STATE_TTL_MS
+      : false;
+  if (conv.awaiting && !awaitingValid) {
+    conv.awaiting = null;
+    await saveRetailConversationState(client.id, conv);
+  }
+
+  // Si el último mensaje del bot fue una pregunta de comprobante/cancel/catalogo, persistimos el await
+  if (
+    lastBotAskedProof &&
+    candidateSeq &&
+    (!conv.awaiting || conv.awaiting.kind !== "proof_confirmation")
+  ) {
+    conv.awaiting = {
+      kind: "proof_confirmation",
+      candidateSeq,
+      createdAt: nowTs,
+      prompt: lastBotMsg || undefined,
+    };
+    await saveRetailConversationState(client.id, conv);
+  }
+
+  if (
+    lastBotAskedCancel(lastBotMsg) &&
+    (!conv.awaiting || conv.awaiting.kind !== "cancel_confirmation")
+  ) {
+    conv.awaiting = {
+      kind: "cancel_confirmation",
+      orderSequence: null,
+      orderId: null,
+      createdAt: nowTs,
+      prompt: lastBotMsg || undefined,
+    };
+    await saveRetailConversationState(client.id, conv);
+  }
+
+  if (
+    lastBotAskedCatalog(lastBotMsg) &&
+    (!conv.awaiting || conv.awaiting.kind !== "catalog_offer")
+  ) {
+    conv.awaiting = { kind: "catalog_offer", createdAt: nowTs, prompt: lastBotMsg || undefined };
+    await saveRetailConversationState(client.id, conv);
+  }
+
+  if (lastBotAskedPromo(lastBotMsg) && (!conv.awaiting || conv.awaiting.kind !== "promo_offer")) {
+    conv.awaiting = { kind: "promo_offer", createdAt: nowTs, prompt: lastBotMsg || undefined };
+    await saveRetailConversationState(client.id, conv);
+  }
+
+  let awaiting = awaitingValid ? conv.awaiting : null;
+
+  // Si el usuario cambia de tema (pregunta algo nuevo), permitimos limpiar el await y seguir
+  const newTopic =
+    awaiting &&
+    (msgText.includes("?") ||
+      isLocationQuestion(msgText) ||
+      asksPaymentMethod(msgText) ||
+      isTransferMention(msgText));
+  if (newTopic && awaiting?.kind !== "proof_confirmation") {
+    awaiting = null;
+    await clearRetailAwaiting(client.id);
+  }
+
+  const softAckShort =
+    isSoftAck(msgText) &&
+    (msgText.trim().split(/\s+/).length <= 4 && msgText.trim().length <= 40);
+
+  if (awaiting && softAckShort) {
+    await clearRetailAwaiting(client.id);
+    await sendMessage("Dale, avisame qué necesitás y seguimos.");
+    // seguimos por si el mensaje trae más contexto
+  }
+
+  // Ack genérico después de respuesta informativa (sin awaiting)
+  if (!awaiting && softAckShort && lastBotMsg) {
+    await sendMessage("Genial, contame si querés pedir algo o si tenés otra consulta.");
+    return true;
+  }
+
+  // ===============================
+  // ✅ Seguir el hilo de preguntas directas (comprobante, catálogo, ubicación, cancelar)
+  // ===============================
+  if (awaiting?.kind === "proof_confirmation") {
+    const seqInMsg = extractOrderSeqFromText(msgText);
+
+    if (isYes(msgText) && awaiting.candidateSeq) {
+      const ok = await assignLatestUnassignedProofToOrder({
+        doctorId: doctor.id,
+        clientId: client.id,
+        orderSequenceNumber: awaiting.candidateSeq,
+      });
+      if (ok) {
+        await clearAwaitingProofOrderNumber({ doctorId: doctor.id, clientId: client.id });
+        await clearRetailAwaiting(client.id);
+        logAwaitingConsume("proof_confirmation", msgText);
+        await sendMessage(`Listo ✅ Ya cargué tu comprobante para el pedido #${awaiting.candidateSeq}.`);
+        return true;
+      }
+      await setAwaitingProofOrderNumber({ doctorId: doctor.id, clientId: client.id });
+      await sendMessage(
+        `No pude asignarlo automático al pedido #${awaiting.candidateSeq}. ` +
+          `Pasame el número correcto (ej: 5) o reenviá el comprobante.`
+      );
+      return true;
+    }
+
+    if (seqInMsg) {
+      const ok = await assignLatestUnassignedProofToOrder({
+        doctorId: doctor.id,
+        clientId: client.id,
+        orderSequenceNumber: seqInMsg,
+      });
+      if (ok) {
+        await clearAwaitingProofOrderNumber({ doctorId: doctor.id, clientId: client.id });
+        await clearRetailAwaiting(client.id);
+        logAwaitingConsume("proof_confirmation", msgText);
+        await sendMessage(`Listo ✅ Asigné el comprobante al pedido #${seqInMsg}.`);
+        return true;
+      }
+      await setAwaitingProofOrderNumber({ doctorId: doctor.id, clientId: client.id });
+      await sendMessage(
+        `No encontré tu pedido #${seqInMsg}. Mandame el número correcto (ej: 6) o reenviá el comprobante.`
+      );
+      return true;
+    }
+
+    if (/\bno\b/.test(norm(msgText))) {
+      await clearAwaitingProofOrderNumber({ doctorId: doctor.id, clientId: client.id });
+      await clearRetailAwaiting(client.id);
+      logAwaitingConsume("proof_confirmation", msgText);
+      await sendMessage("Ok, ignoro el comprobante. Decime qué necesitás y seguimos.");
+      return true;
+    }
+
+    if (isConfusion(msgText) && awaiting.prompt) {
+      const core = firstSentence(awaiting.prompt);
+      await sendMessage(core ? `Perdón 🙏 Te preguntaba: ${core}` : "¿Para qué pedido era el comprobante?");
+      return true;
+    }
+
+    await setAwaitingProofOrderNumber({ doctorId: doctor.id, clientId: client.id });
+    await sendMessage("¿Para qué pedido es el comprobante? Decime el número (ej: 5).");
+    return true;
+  }
+
+  if (awaiting?.kind === "catalog_offer") {
+    if (isNo(msgText)) {
+      await clearRetailAwaiting(client.id);
+      logAwaitingConsume("catalog_offer", msgText);
+      await sendMessage("Dale, no te envío el catálogo. Decime qué necesitás y te ayudo.");
+      return true;
+    }
+    if (isYes(msgText)) {
+      await clearRetailAwaiting(client.id);
+      logAwaitingConsume("catalog_offer", msgText);
+      await sendCatalog();
+      return true;
+    }
+    if (isConfusion(msgText) && awaiting.prompt) {
+      await sendMessage(`Te preguntaba si querés que te envíe el catálogo. ¿Sí o no?`);
+      return true;
+    }
+  }
+
+  if (awaiting?.kind === "location_offer") {
+    if (isNo(msgText)) {
+      await clearRetailAwaiting(client.id);
+      logAwaitingConsume("location_offer", msgText);
+      await sendMessage("Ok, no envío ubicación. ¿Querés pedir algo o consultar stock/precios?");
+      return true;
+    }
+    if (isYes(msgText)) {
+      await clearRetailAwaiting(client.id);
+      const addr =
+        (doctor as any).businessAddress ||
+        (doctor as any).clinicAddress ||
+        (doctor as any).officeAddress ||
+        (doctor as any).address ||
+        null;
+      if (addr) {
+        await sendMessage(`Estamos en ${addr}. Te paso ubicación si la necesitas.`);
+      } else {
+        await sendMessage("Estamos operando online. Si necesitás retirar, avisame y te paso la dirección.");
+      }
+      logAwaitingConsume("location_offer", msgText);
+      return true;
+    }
+    if (isConfusion(msgText) && awaiting.prompt) {
+      await sendMessage("Te preguntaba si querés que te comparta la ubicación. ¿Sí o no?");
+      return true;
+    }
+  }
+
+  if (awaiting?.kind === "cancel_confirmation") {
+    if (isYes(msgText)) {
+      const pending = await prisma.order.findFirst({
+        where: { doctorId: doctor.id, clientId: client.id, status: "pending" },
+        include: { items: true },
+        orderBy: { createdAt: "desc" },
+      });
+
+      if (!pending) {
+        await clearRetailAwaiting(client.id);
+        await sendMessage("No encontré un pedido para cancelar.");
+        return true;
+      }
+
+      await restockOrderInventory(pending);
+      await prisma.order.update({
+        where: { id: pending.id },
+        data: { status: "cancelled" },
+      });
+      await clearRetailAwaiting(client.id);
+      logAwaitingConsume("cancel_confirmation", msgText);
+      await sendMessage(
+        `Listo, cancelé el pedido #${pending.sequenceNumber}. Si querés armar uno nuevo, decime qué productos necesitas.`
+      );
+      return true;
+    }
+
+    if (isNo(msgText)) {
+      await clearRetailAwaiting(client.id);
+      logAwaitingConsume("cancel_confirmation", msgText);
+      await sendMessage("No cancelo nada. ¿Querías algo más o era solo consulta?");
+      return true;
+    }
+
+    if (isConfusion(msgText) && awaiting.prompt) {
+      const core = firstSentence(awaiting.prompt);
+      await sendMessage(core ? `Te preguntaba: ${core}` : "¿Querés cancelar el pedido pendiente?");
+      return true;
+    }
+  }
+
+  if (awaiting?.kind === "promo_offer") {
+    if (isNo(msgText)) {
+      await clearRetailAwaiting(client.id);
+      await sendMessage("Ok, no aplico promo. ¿Querés otra cosa o armar un pedido?");
+      return true;
+    }
+    if (isYes(msgText)) {
+      await clearRetailAwaiting(client.id);
+      await sendMessage("Dale, aplico promo si corresponde al pedido. Contame qué productos/cantidades querés.");
+      return true;
+    }
+    if (isConfusion(msgText) && awaiting.prompt) {
+      await sendMessage("Te preguntaba si querés aplicar la promo. ¿Sí o no?");
+      return true;
+    }
+  }
+
   // ===============================
   // ✅ Seguir el hilo: si estamos esperando que el cliente elija una opción
   // (ej: "faltan galletitas" -> ofrecemos 1) Don Satur 2) ... -> cliente responde "2")
   // ===============================
-  const conv = await loadRetailConversationState(client.id);
-  if (conv?.awaiting?.kind === "choose_product") {
+  if (awaiting?.kind === "choose_product") {
+    // Permitir abortar o cambiar de tema
+    if (isNo(msgText)) {
+      await clearRetailAwaiting(client.id);
+      await sendMessage("Ok, no elijo producto. Decime qué querés pedir o consultá stock/precios.");
+      // seguimos con el resto por si trae un pedido nuevo
+    } else if (msgText.includes("?")) {
+      // deja pasar al resto de la lógica (puede ser otra pregunta)
+    } else {
     const t = norm(rawText || "");
-    const candidates = conv.awaiting.candidates || [];
-    const desiredQty = typeof conv.awaiting.desiredQuantity === "number" ? conv.awaiting.desiredQuantity : undefined;
+    const candidates = awaiting.candidates || [];
+    const desiredQty =
+      typeof awaiting.desiredQuantity === "number" ? awaiting.desiredQuantity : undefined;
 
     // números en el mensaje (puede ser "1", o "1 x 2")
     const nums = Array.from(t.matchAll(/\b(\d+)\b/g)).map((m) => Number(m[1]));
@@ -888,10 +1285,10 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
 
     // Si mandó solo cantidad, la guardamos y volvemos a pedir opción
     if (!choiceIdx && qty && qty > 0) {
-      conv.awaiting.desiredQuantity = qty;
-      await saveRetailConversationState(client.id, conv);
+      awaiting.desiredQuantity = qty;
+      await setRetailAwaiting(client.id, awaiting as any);
       await sendMessage(
-        `Dale. ¿Cuál opción querés para *${conv.awaiting.term}*?\n\n` +
+        `Dale. ¿Cuál opción querés para *${awaiting.term}*?\n\n` +
           formatProductOptions(
             candidates.map((c) => ({
               name: c.name,
@@ -906,7 +1303,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
 
     if (!choiceIdx || choiceIdx < 1 || choiceIdx > candidates.length) {
       await sendMessage(
-        `No te entendí cuál elegís 🙏 Respondé con el número de opción (1, 2, 3...) para *${conv.awaiting.term}*.`
+        `No te entendí cuál elegís 🙏 Respondé con el número de opción (1, 2, 3...) para *${awaiting.term}*.`
       );
       return true;
     }
@@ -916,9 +1313,17 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
 
     if (!finalQty || finalQty <= 0) {
       // Tenemos el producto, falta cantidad
-      conv.awaiting.candidates = [selected];
-      conv.awaiting.desiredQuantity = undefined;
-      await saveRetailConversationState(client.id, conv);
+      awaiting.candidates = [selected];
+      awaiting.desiredQuantity = undefined;
+      await setRetailAwaiting(client.id, {
+        kind: "quantity_needed",
+        productName: selected.name,
+        candidates: [selected],
+        op: awaiting.op || "add",
+        orderSequence: awaiting.orderSequence,
+        createdAt: Date.now(),
+        prompt: `¿Cuántas querés de ${selected.name}?`,
+      });
       await sendMessage(`Perfecto: *${selected.name}*. ¿Cuántas querés? (ej: 2)`);
       return true;
     }
@@ -933,13 +1338,77 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
           name: selected.name,
           normalizedName: selected.name,
           quantity: finalQty,
-          op: conv.awaiting.op || "add",
+          op: awaiting.op || "add",
           note: "",
         },
       ],
     } as any;
 
     await clearRetailAwaiting(client.id);
+    }
+  }
+
+  if (awaiting?.kind === "quantity_needed") {
+    const nums = Array.from(norm(msgText || "").matchAll(/\b(\d+)\b/g)).map((m) => Number(m[1]));
+    const qty = nums[0];
+    if (qty && qty > 0) {
+      // Convertimos en acción directa para el producto pendiente
+      const candidates = awaiting.candidates || [];
+      const selected = candidates[0];
+      if (selected) {
+        action = {
+          type: "retail_upsert_order",
+          mode: "merge",
+          status: "pending",
+          items: [
+            {
+              name: selected.name,
+              normalizedName: selected.name,
+              quantity: qty,
+              op: awaiting.op || "add",
+              note: "",
+            },
+          ],
+        } as any;
+        await clearRetailAwaiting(client.id);
+        logAwaitingConsume("quantity_needed", msgText);
+        // dejamos seguir para que la lógica normal procese el upsert
+      } else {
+        await sendMessage("Decime la cantidad y el producto para poder agregarlo.");
+        return true;
+      }
+    } else if (isConfusion(msgText) || msgText.includes("?")) {
+      await sendMessage("Necesito la cantidad. Ej: 2");
+      return true;
+    }
+  }
+
+  if (awaiting?.kind === "stock_replacement") {
+    const missing = awaiting.missing || [];
+    if (!missing.length) {
+      await clearRetailAwaiting(client.id);
+      await sendMessage("No tengo claro qué producto ajustar. Decime qué cambiamos.");
+      return true;
+    }
+    if (isNo(msgText)) {
+      await clearRetailAwaiting(client.id);
+      logAwaitingConsume("stock_replacement", msgText);
+      await sendMessage("No ajusto el pedido. Decime si querés otra cosa.");
+      return true;
+    }
+    if (isYes(msgText)) {
+      await clearRetailAwaiting(client.id);
+      logAwaitingConsume("stock_replacement", msgText);
+      await sendMessage("Decime con qué querés reemplazar o la cantidad que ajustamos.");
+      return true;
+    }
+    if (isSoftAck(msgText)) {
+      await clearRetailAwaiting(client.id);
+      logAwaitingConsume("stock_replacement", msgText);
+      await sendMessage("Ok, dejamos el pedido como está. Avisame si querés otro ajuste.");
+      return true;
+    }
+    // Si da un nombre nuevo, dejamos que siga al parser normal (se tratará como upsert)
   }
 
 
@@ -1366,6 +1835,54 @@ if (awaitingRemove) {
 
   const msgText = (rawText || "").trim();
 
+  if (isLocationQuestion(msgText)) {
+    const addr =
+      (doctor as any).businessAddress ||
+      (doctor as any).clinicAddress ||
+      (doctor as any).officeAddress ||
+      (doctor as any).address ||
+      null;
+    if (addr) {
+      await sendMessage(`Estamos en ${addr}. ¿Querés que te comparta la ubicación?`);
+      await setRetailAwaiting(client.id, {
+        kind: "location_offer",
+        createdAt: Date.now(),
+        prompt: "¿Querés que te comparta la ubicación?",
+      });
+    } else {
+    await sendMessage("Estamos operando online. Si necesitás retirar, avisame y te paso la dirección.");
+    }
+    return true;
+  }
+
+  if (awaiting?.kind === "quantity_needed") {
+    const nums = Array.from(norm(msgText || "").matchAll(/\b(\d+)\b/g)).map((m) => Number(m[1]));
+    const qty = nums[0];
+    if (qty && qty > 0) {
+      const candidates = awaiting.candidates || [];
+      const selected = candidates[0] || { name: awaiting.productName, normalizedName: awaiting.productName };
+      action = {
+        type: "retail_upsert_order",
+        mode: "merge",
+        status: "pending",
+        items: [
+          {
+            name: selected.name,
+            normalizedName: selected.name,
+            quantity: qty,
+            op: awaiting.op || "add",
+            note: "",
+          },
+        ],
+      } as any;
+      await clearRetailAwaiting(client.id);
+      // seguimos al flujo normal para procesar el upsert
+    } else if (isConfusion(msgText) || msgText.includes("?")) {
+      await sendMessage("Necesito la cantidad. Ej: 2");
+      return true;
+    }
+  }
+
   // ✅ Alias/CBU (determinístico)
   if (asksPaymentMethod(msgText)) {
     const alias = (doctor as any)?.businessAlias?.trim?.();
@@ -1439,23 +1956,6 @@ if (awaitingRemove) {
     return true;
   }
 
-  // ✅ Asignación de comprobantes (intercepta antes de confirmar pedido)
-  const lastBotMsgRow = await prisma.message.findFirst({
-    where: {
-      doctorId: doctor.id,
-      retailClientId: client.id,
-      direction: "outgoing",
-      body: { not: null },
-    },
-    orderBy: { createdAt: "desc" },
-    select: { body: true },
-  });
-  const lastBotMsg = lastBotMsgRow?.body || "";
-
-  const lastBotAskedProof = /comprobante|captura de la transferencia|mand[aá] el comprobante/i.test(
-    lastBotMsg
-  );
-
   if (lastBotAskedProof && (isNo(msgText) || isStopProofText(msgText))) {
     await sendMessage("Listo, no tomo el pago. Cuando tengas el comprobante, mandalo y lo asigno al pedido.");
     return true;
@@ -1518,8 +2018,6 @@ if (awaitingRemove) {
     );
     return true;
   }
-
-  const candidateSeq = parseProofCandidateFromLastBotMessage(lastBotMsg);
 
   if (candidateSeq && (isYes(msgText) || isNo(msgText))) {
     if (isYes(msgText)) {
@@ -1655,17 +2153,30 @@ if (awaitingRemove) {
     });
     const prodById = new Map(products.map((p) => [p.id, p]));
 
-    const shortages = [];
+    const shortages: Array<{ productId: number; name: string; have: number; need: number }> = [];
     for (const [pid, need] of needByProductId.entries()) {
       const p = prodById.get(pid);
       const have = p?.quantity ?? 0;
       if (!p || have < need) {
-        shortages.push({ name: p?.name ?? "Producto", have, need });
+        shortages.push({ productId: pid, name: p?.name ?? "Producto", have, need });
       }
     }
 
     if (shortages.length > 0) {
       const msg = shortages.map((s) => `• ${s.name}: pediste ${s.need}, hay ${s.have}`).join("\n");
+      await setRetailAwaiting(client.id, {
+        kind: "stock_replacement",
+        missing: shortages.map((s) => ({
+          productId: s.productId,
+          name: s.name,
+          need: s.need,
+          have: s.have,
+        })),
+        orderSequence: pending.sequenceNumber,
+        orderId: pending.id,
+        createdAt: Date.now(),
+        prompt: `No tengo stock suficiente para confirmar`,
+      });
       await sendMessage(
         `No tengo stock suficiente para confirmar 😕\n\n${msg}\n\n` +
           `Decime si querés ajustar cantidades o reemplazar.`
@@ -1740,6 +2251,27 @@ if (awaitingRemove) {
     const candidate = (it?.normalizedName || it?.name || "").toString();
     return appearsInMessage(candidate, rawText);
   });
+
+  // Extraer intents del texto crudo (add/remove/set) para frases mixtas
+  const extracted = extractIntentItems(rawText || "");
+  if (extracted.length) {
+    const existingKeys = new Set(
+      items
+        .map((it: any) => norm((it?.normalizedName || it?.name || "").toString()))
+        .filter(Boolean)
+    );
+    extracted.forEach((ex) => {
+      const key = norm(ex.name);
+      if (existingKeys.has(key)) return;
+      items.push({
+        name: ex.name,
+        normalizedName: ex.name,
+        quantity: ex.quantity,
+        op: ex.op,
+      });
+      existingKeys.add(key);
+    });
+  }
 
   // Fallback robusto: capturar patrones "n producto" incluso si la IA omitió alguno
   const fallbackItems: Array<{ name: string; quantity: number }> = [];
@@ -1867,16 +2399,22 @@ if (awaitingRemove) {
       return true;
     }
 
+    const latestPending = await prisma.order.findFirst({
+      where: { doctorId: doctor.id, clientId: client.id, status: "pending" },
+      orderBy: { createdAt: "desc" },
+      select: { sequenceNumber: true, id: true },
+    });
+
     // Guardar estado para el próximo mensaje
-    await saveRetailConversationState(client.id, {
-      awaiting: {
-        kind: "choose_product",
-        term,
-        candidates: candidates.map((p: any) => ({ productId: p.id, name: p.name })),
-        desiredQuantity: qty,
-        op: (miss.op as any) || "add",
-        createdAt: Date.now(),
-      },
+    await setRetailAwaiting(client.id, {
+      kind: "choose_product",
+      term,
+      candidates: candidates.map((p: any) => ({ productId: p.id, name: p.name })),
+      desiredQuantity: qty,
+      op: (miss.op as any) || "add",
+      orderSequence: latestPending?.sequenceNumber ?? null,
+      orderId: latestPending?.id ?? null,
+      createdAt: Date.now(),
     });
 
     const options = formatProductOptions(candidates);
@@ -1913,6 +2451,16 @@ Respondeme con el número de opción (ej: "1")` +
     orderBy: { createdAt: "desc" },
   });
 
+  // Elegir pedido objetivo respetando el estado conversacional (orderId/sequence)
+  let target = pendingOrders[0] ?? null;
+  if (awaiting?.orderId) {
+    const found = pendingOrders.find((o) => o.id === awaiting.orderId);
+    if (found) target = found;
+  } else if (awaiting?.orderSequence) {
+    const found = pendingOrders.find((o) => o.sequenceNumber === awaiting.orderSequence);
+    if (found) target = found;
+  }
+
   const wantsEdit =
     /\b(editar|cambiar|modificar|ajustar|actualizar)\b/i.test(rawText || "") &&
     (!Array.isArray(action.items) || action.items.length === 0);
@@ -1944,7 +2492,7 @@ Respondeme con el número de opción (ej: "1")` +
     /\b(quiero|armame|arma|haceme|hace(me)?|pasame|pedido nuevo|arranca|empeza|empezar)\b/i.test(rawText || "") &&
     !/\b(sum(ar|ame|á)|agreg(ar|ame|á|alas)|añad(ir|ime|í)|mas|\+)\b/i.test(rawText || "");
 
-  const target = pendingOrders[0] ?? null;
+  let target = pendingOrders[0] ?? null;
   const targetOrderId = target?.id ?? null;
   const beforeItemsSnapshot = (target?.items || []).map((it) => {
     const productName = products.find((p) => p.id === it.productId)?.name || "Producto";
@@ -2003,16 +2551,37 @@ Respondeme con el número de opción (ej: "1")` +
   }
 
   // Stock check con cantidades finales
-  const stockIssues: string[] = [];
+  const stockIssues: Array<{ name: string; have: number; need: number; productId: number }> = [];
   finalItems.forEach((item) => {
     const product = products.find((p) => p.id === item.productId);
     if (product && product.quantity < item.quantity) {
-      stockIssues.push(product.name);
+      stockIssues.push({
+        name: product.name,
+        have: product.quantity ?? 0,
+        need: item.quantity,
+        productId: product.id,
+      });
     }
   });
   if (stockIssues.length > 0) {
+    await setRetailAwaiting(client.id, {
+      kind: "stock_replacement",
+      missing: stockIssues.map((s) => ({
+        productId: s.productId,
+        name: s.name,
+        need: s.need,
+        have: s.have,
+      })),
+      orderSequence: target?.sequenceNumber ?? null,
+      orderId: target?.id ?? null,
+      createdAt: Date.now(),
+      prompt: `No hay stock suficiente para ${stockIssues.map((s) => s.name).join(", ")}`,
+    });
+    const msg = stockIssues
+      .map((s) => `• ${s.name}: pediste ${s.need}, hay ${s.have}`)
+      .join("\n");
     await sendMessage(
-      `No tengo stock suficiente para: ${stockIssues.join(", ")}. Decime si querés ajustar cantidades o reemplazar.`
+      `No tengo stock suficiente para esos productos 😕\n\n${msg}\n\nDecime si querés ajustar cantidades o reemplazar por otra marca/variante.`
     );
     return true;
   }
