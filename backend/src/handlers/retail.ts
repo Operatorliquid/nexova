@@ -181,6 +181,7 @@ type RetailConversationState = {
       }
     | {
         kind: "proof_confirmation";
+        proofId?: number | null;
         candidateSeq: number | null;
         createdAt: number;
         prompt?: string;
@@ -282,6 +283,26 @@ async function setRetailAwaiting(
     orderSequence: (awaiting as any).orderSequence,
     orderId: (awaiting as any).orderId,
   });
+}
+
+export async function setRetailProofConfirmationAwaiting(params: {
+  clientId: number;
+  proofId: number | null;
+  candidateSeq: number | null;
+  prompt?: string;
+}) {
+  await setRetailAwaiting(params.clientId, {
+    kind: "proof_confirmation",
+    proofId: params.proofId,
+    candidateSeq: params.candidateSeq ?? null,
+    createdAt: Date.now(),
+    prompt: params.prompt,
+  });
+}
+
+export async function hasRetailProofConfirmationAwaiting(clientId: number): Promise<boolean> {
+  const st = await loadRetailConversationState(clientId);
+  return st.awaiting?.kind === "proof_confirmation";
 }
 
 
@@ -630,34 +651,46 @@ export async function assignLatestUnassignedProofToOrder(params: {
   doctorId: number;
   clientId: number;
   orderSequenceNumber: number;
+  proofId?: number | null;
 }): Promise<boolean> {
-  const { doctorId, clientId, orderSequenceNumber } = params;
+  const { doctorId, clientId, orderSequenceNumber, proofId } = params;
   const target = await prisma.order.findFirst({
     where: { doctorId, clientId, sequenceNumber: orderSequenceNumber },
     select: { id: true, totalAmount: true, paidAmount: true },
   });
   if (!target) return false;
 
-  const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+  const proofStatusFilter = {
+    in: [
+      PaymentProofStatus.unassigned,
+      PaymentProofStatus.duplicate,
+      PaymentProofStatus.needs_review,
+    ],
+  };
 
   // Tomamos primero el más reciente en los últimos 10 minutos; si no hay, hacemos fallback al último sin asignar.
-  let latestProof = await prisma.paymentProof.findFirst({
-    where: {
-      doctorId,
-      clientId,
-      orderId: null,
-      status: { in: [PaymentProofStatus.unassigned, PaymentProofStatus.duplicate] },
-      createdAt: { gte: tenMinutesAgo },
-    },
-    orderBy: { createdAt: "desc" },
-    select: {
-      id: true,
-      fileUrl: true,
-      fileName: true,
-      contentType: true,
-      amount: true,
-    },
-  });
+  let latestProof = proofId
+    ? await prisma.paymentProof.findFirst({
+        where: {
+          id: proofId,
+          doctorId,
+          clientId,
+          orderId: null,
+          status: proofStatusFilter,
+        },
+        select: {
+          id: true,
+          fileUrl: true,
+          fileName: true,
+          contentType: true,
+          amount: true,
+        },
+      })
+    : null;
+
+  if (proofId && !latestProof) return false;
+
+  const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
 
   if (!latestProof) {
     latestProof = await prisma.paymentProof.findFirst({
@@ -665,7 +698,27 @@ export async function assignLatestUnassignedProofToOrder(params: {
         doctorId,
         clientId,
         orderId: null,
-        status: { in: [PaymentProofStatus.unassigned, PaymentProofStatus.duplicate] },
+        status: proofStatusFilter,
+        createdAt: { gte: tenMinutesAgo },
+      },
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        fileUrl: true,
+        fileName: true,
+        contentType: true,
+        amount: true,
+      },
+    });
+  }
+
+  if (!latestProof) {
+    latestProof = await prisma.paymentProof.findFirst({
+      where: {
+        doctorId,
+        clientId,
+        orderId: null,
+        status: proofStatusFilter,
       },
       orderBy: { createdAt: "desc" },
       select: {
@@ -1109,12 +1162,14 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
   // ===============================
   if (awaiting?.kind === "proof_confirmation") {
     const seqInMsg = extractOrderSeqFromText(msgText);
+    const proofId = awaiting.proofId ?? null;
 
     if (isYes(msgText) && awaiting.candidateSeq) {
       const ok = await assignLatestUnassignedProofToOrder({
         doctorId: doctor.id,
         clientId: client.id,
         orderSequenceNumber: awaiting.candidateSeq,
+        proofId,
       });
       if (ok) {
         await clearAwaitingProofOrderNumber({ doctorId: doctor.id, clientId: client.id });
@@ -1136,6 +1191,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
         doctorId: doctor.id,
         clientId: client.id,
         orderSequenceNumber: seqInMsg,
+        proofId,
       });
       if (ok) {
         await clearAwaitingProofOrderNumber({ doctorId: doctor.id, clientId: client.id });

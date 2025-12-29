@@ -40,6 +40,8 @@ import {
 import {
   handleRetailAgentAction,
   setAwaitingProofOrderNumber,
+  setRetailProofConfirmationAwaiting,
+  hasRetailProofConfirmationAwaiting,
 } from "./handlers/retail";
 import { handleHealthWebhookMessage } from "./handlers/health";
 import {
@@ -4040,47 +4042,6 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
               );
               const fileUrl = savedFile.url;
 
-             const duplicateExact = await prisma.paymentProof.findFirst({
-  where: {
-    doctorId: doctor.id,
-    clientId: retailClient.id, // ✅ clave: no mezclar clientes
-    bytesSha256: hash,
-  },
-  orderBy: { createdAt: "desc" },
-});
-
-              let duplicateOfId = duplicateExact?.id ?? null;
-
-              if (!duplicateOfId && dhash) {
-                const candidates = await prisma.paymentProof.findMany({
-  where: {
-    doctorId: doctor.id,
-    clientId: retailClient.id, // ✅ clave: no mezclar clientes
-    imageDhash: { not: null },
-  },
-  select: { id: true, imageDhash: true },
-  orderBy: { createdAt: "desc" },
-  take: 40,
-});
-
-                const hammingHex = (a: string, b: string) => {
-                  const len = Math.min(a.length, b.length);
-                  let diff = 0;
-                  for (let j = 0; j < len; j += 1) {
-                    const na = parseInt(a[j], 16);
-                    const nb = parseInt(b[j], 16);
-                    if (Number.isNaN(na) || Number.isNaN(nb)) continue;
-                    diff += (na ^ nb).toString(2).split("1").length - 1;
-                  }
-                  return diff;
-                };
-
-                const similar = candidates.find(
-                  (c) => c.imageDhash && hammingHex(dhash, c.imageDhash) <= MIN_DHASH_SIMILARITY
-                );
-                if (similar) duplicateOfId = similar.id;
-              }
-
               const extraction =
                 automationOpenAIClient && media.contentType
                   ? await extractProofWithOpenAI({
@@ -4096,7 +4057,64 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
                   ? new Date(extraction.dateISO)
                   : null;
 
-              await prisma.paymentProof.create({
+              const hasAmount = extraction?.amount != null;
+              const hasReference = !!extraction?.reference;
+
+              const duplicateExact = await prisma.paymentProof.findFirst({
+                where: {
+                  doctorId: doctor.id,
+                  clientId: retailClient.id, // ✅ clave: no mezclar clientes
+                  bytesSha256: hash,
+                },
+                orderBy: { createdAt: "desc" },
+              });
+
+              let duplicateOfId = duplicateExact?.id ?? null;
+              let duplicateKind: "exact" | "possible" | null = duplicateExact ? "exact" : null;
+
+              if (!duplicateOfId && dhash && (hasAmount || hasReference)) {
+                const orFilters = [];
+                if (hasAmount) orFilters.push({ amount: extraction?.amount ?? null });
+                if (hasReference) orFilters.push({ reference: extraction?.reference ?? null });
+
+                const candidates = await prisma.paymentProof.findMany({
+                  where: {
+                    doctorId: doctor.id,
+                    clientId: retailClient.id, // ✅ clave: no mezclar clientes
+                    imageDhash: { not: null },
+                    ...(orFilters.length ? { OR: orFilters } : {}),
+                  },
+                  select: { id: true, imageDhash: true, amount: true, reference: true },
+                  orderBy: { createdAt: "desc" },
+                  take: 40,
+                });
+
+                const hammingHex = (a: string, b: string) => {
+                  const len = Math.min(a.length, b.length);
+                  let diff = 0;
+                  for (let j = 0; j < len; j += 1) {
+                    const na = parseInt(a[j], 16);
+                    const nb = parseInt(b[j], 16);
+                    if (Number.isNaN(na) || Number.isNaN(nb)) continue;
+                    diff += (na ^ nb).toString(2).split("1").length - 1;
+                  }
+                  return diff;
+                };
+
+                const similar = candidates.find(
+                  (c) =>
+                    c.imageDhash &&
+                    hammingHex(dhash, c.imageDhash) <= MIN_DHASH_SIMILARITY &&
+                    ((hasAmount && c.amount === extraction?.amount) ||
+                      (hasReference && c.reference === extraction?.reference))
+                );
+                if (similar) {
+                  duplicateOfId = similar.id;
+                  duplicateKind = "possible";
+                }
+              }
+
+              const createdProof = await prisma.paymentProof.create({
                 data: {
                   doctorId: doctor.id,
                   clientId: retailClient.id,
@@ -4115,18 +4133,27 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
                   status: "unassigned",
                   duplicateOfId: duplicateOfId ?? undefined,
                 },
+                select: { id: true },
               });
 
               const amountText =
                 extraction?.amount != null ? `$${extraction.amount}` : null;
 
-              const reply = duplicateOfId
-                ? candidateSeq
-                  ? `Ojo, este comprobante parece repetido. ${amountText ? `Detecté ${amountText}. ` : ""}¿Lo asigno igual al pedido #${candidateSeq}?`
-                  : `Ojo, este comprobante parece repetido. ${amountText ? `Detecté ${amountText}. ` : ""}¿Para qué pedido es? Decime el número (ej: 6).`
+              const amountHint = amountText ? ` Detecté ${amountText}.` : "";
+              const duplicateIntro =
+                duplicateKind === "exact"
+                  ? "Este comprobante ya está cargado."
+                  : duplicateKind === "possible"
+                  ? "Ojo, posible duplicado."
+                  : null;
+              const replyQuestion = candidateSeq
+                ? `¿Lo asigno igual al pedido #${candidateSeq}?`
+                : "¿Para qué pedido es? Decime el número (ej: 6).";
+              const reply = duplicateIntro
+                ? `${duplicateIntro}${amountHint} ${replyQuestion}`
                 : candidateSeq
-                ? `Recibí tu comprobante ✅${amountText ? ` Detecté ${amountText}.` : ""} ¿Es para el pedido #${candidateSeq}?`
-                : `Recibí tu comprobante ✅${amountText ? ` Detecté ${amountText}.` : ""} ¿Para qué pedido es? Decime el número (ej: 6).`;
+                ? `Recibí tu comprobante ✅${amountHint} ¿Es para el pedido #${candidateSeq}?`
+                : `Recibí tu comprobante ✅${amountHint} ¿Para qué pedido es? Decime el número (ej: 6).`;
 
               if (!candidateSeq) {
                 await setAwaitingProofOrderNumber({
@@ -4134,6 +4161,13 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
                   clientId: retailClient.id,
                 });
               }
+
+              await setRetailProofConfirmationAwaiting({
+                clientId: retailClient.id,
+                proofId: createdProof.id,
+                candidateSeq,
+                prompt: reply,
+              });
 
               const waResult = await sendWhatsAppText(
                 phoneE164,
@@ -4200,6 +4234,21 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
       }
 
       if (!bodyText) return res.sendStatus(200);
+
+      if (await hasRetailProofConfirmationAwaiting(retailClient.id)) {
+        const retailHandled = await handleRetailAgentAction({
+          doctor,
+          retailClient,
+          patient: null,
+          action: { type: "general", items: [] },
+          replyToPatient: "",
+          phoneE164,
+          doctorNumber,
+          doctorWhatsappConfig,
+          rawText: bodyText,
+        });
+        if (retailHandled) return res.sendStatus(200);
+      }
 
       const historyRaw = await prisma.message.findMany({
         where: { retailClientId: retailClient.id },

@@ -68,6 +68,8 @@ Reglas de comportamiento:
 - Si el cliente dice ‘eh?/qué?/cómo?/what/como?/que decis/el que/queee/quee?no entiendo’: re-explicá lo último, NO cambies de tema a pedidos.
 - No canceles pedidos ante mensajes ambiguos tipo “olvidalo”, “dejalo”, “no”, a menos que explícitamente pidan cancelar. Si no queda claro, pedí confirmación o seguí con la última consigna pendiente.
 - Antes de decir que no hay un producto, buscá por categorías/etiquetas/descripcion además del nombre. Si el término aparece en tags/categorías/descripcion de algún producto, ofrecelos como opción en vez de decir que no hay.
+- Si el mensaje es solo un saludo ("hola", "buenas", "👋") y no trae productos/cantidades/preguntas, respondé el saludo y ofrecé ayuda. Acción: "general". Nunca crees/modifiques un pedido en ese caso.
+
 
 Precios / promos:
 - Si preguntan precio de un producto y está en el catálogo/contexto, respondé con el precio.
@@ -100,6 +102,10 @@ export async function runRetailAgent(
   openai: OpenAI | null
 ): Promise<AgentExecutionResult | null> {
   if (!openai) return null;
+  // Fast-paths determinísticos (evita que la IA delire en casos simples)
+const fast = fastPathRetailMessage(ctx);
+if (fast) return fast;
+
 
   try {
     const productCatalog = (ctx as any).productCatalog;
@@ -156,9 +162,11 @@ export async function runRetailAgent(
           }
         : null;
 
+    const validated = postValidateRetailAction(ctx, reply, action);
+
     return {
-      replyToPatient: reply,
-      action,
+      replyToPatient: validated.reply,
+      action: validated.action,
       profileUpdates,
     };
   } catch (error) {
@@ -166,6 +174,188 @@ export async function runRetailAgent(
     return null;
   }
 }
+
+function fastPathRetailMessage(ctx: AgentContextBase): AgentExecutionResult | null {
+  const raw = String((ctx as any).text || "").trim();
+  if (!raw) return null;
+
+  const norm = normalizeQuick(raw);
+
+  const media = (ctx as any).incomingMedia || (ctx as any).media;
+  const hasMedia =
+    !!media &&
+    (Number(media.count) > 0 ||
+      (Array.isArray(media.urls) && media.urls.length > 0) ||
+      (Array.isArray(media.mediaUrls) && media.mediaUrls.length > 0));
+
+  // ✅ 1) Saludos simples -> no tocar pedidos
+  if (!hasMedia && isGreetingOnly(norm)) {
+    const reply =
+      "¡Hola! 👋 ¿Qué necesitás hoy: armar un pedido, ver precios/promos o consultar un pedido?";
+    return {
+      replyToPatient: reply,
+      action: sanitizeAction({
+        type: "general",
+        intent: "greeting_fastpath",
+        confidence: 1,
+      }),
+      profileUpdates: null,
+    };
+  }
+
+  // ✅ 1.5) Consulta de alias/CBU/CVU (medio de pago) -> responder directo
+  if (!hasMedia && isPaymentAliasQuery(norm)) {
+    const storeProfile = (ctx as any).storeProfile || (ctx as any).businessProfile || {};
+    const alias =
+      (storeProfile as any).businessAlias ||
+      (ctx as any).businessAlias ||
+      null;
+
+    const reply = alias
+      ? `Dale 🙌 Para transferir usá este *Alias/CBU*: *${alias}*.\nCuando puedas, mandame el comprobante y lo asocio al pedido.`
+      : `Todavía no tengo cargado el alias/CBU acá 😅. Si me lo pasás, lo dejo guardado para la próxima.`;
+
+    return {
+      replyToPatient: reply,
+      action: sanitizeAction({
+        type: "general",
+        intent: "payment_alias_fastpath",
+        confidence: 1,
+      }),
+      profileUpdates: null,
+    };
+  }
+
+  // ✅ 2) Confirmaciones cortas (OK/dale/listo/etc) -> confirmar pedido pendiente
+  if (!hasMedia && isConfirmOnly(norm)) {
+    const mentioned = extractOrderNumber(raw);
+    const fallbackPending =
+      (ctx.pendingOrders || []).find((o) => o.status === "pending") ||
+      (ctx.pendingOrders || [])[0];
+    const seq = mentioned ?? fallbackPending?.sequenceNumber ?? null;
+
+    if (seq) {
+      const reply = `Listo ✅ Confirmé el pedido #${seq}. Si querés, pasame el comprobante de transferencia o decime si pagás en efectivo.`;
+      return {
+        replyToPatient: reply,
+        action: sanitizeAction({
+          type: "retail_confirm_order",
+          orderSequenceNumber: seq,
+          intent: "confirm_order_fastpath",
+          confidence: 1,
+        }),
+        profileUpdates: null,
+      };
+    }
+
+    const reply =
+      "Dale. Pero ahora no veo un pedido pendiente para confirmar. ¿Querés armar uno nuevo?";
+    return {
+      replyToPatient: reply,
+      action: sanitizeAction({
+        type: "general",
+        intent: "confirm_without_pending",
+        confidence: 0.9,
+      }),
+      profileUpdates: null,
+    };
+  }
+
+  return null;
+}
+
+function normalizeQuick(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function extractOrderNumber(raw: string): number | null {
+  const m = raw.match(/#\s*(\d{1,6})/);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
+function isGreetingOnly(norm: string): boolean {
+  const t = norm.replace(/[!?.…,]+/g, "").trim();
+  return (
+    t === "hola" ||
+    t === "buenas" ||
+    t === "buen dia" ||
+    t === "buenos dias" ||
+    t === "buenas tardes" ||
+    t === "buenas noches" ||
+    t === "hi" ||
+    t === "hello"
+  );
+}
+
+function isConfirmOnly(norm: string): boolean {
+  // Confirmaciones MUY cortas. Excluimos cosas como "si asignalo" (comprobantes)
+  const t = norm.replace(/[!?.…,]+/g, "").trim();
+  if (!t) return false;
+  if (t.includes("asign")) return false;
+  if (t.includes("comprobante")) return false;
+  if (t.includes("transfer")) return false;
+  if (t.includes("pago")) return false;
+
+  const allowed = new Set([
+    "ok",
+    "oki",
+    "okey",
+    "okay",
+    "dale",
+    "listo",
+    "confirmo",
+    "confirmar",
+    "confirmado",
+    "perfecto",
+    "genial",
+    "joya",
+    "de una",
+    "deuna",
+    "si",
+    "sii",
+    "sí",
+  ]);
+
+  const simplified = t.replace(/pedido\s*/g, "").trim();
+  const withoutOrder = simplified.replace(/#\s*\d{1,6}/g, "").trim();
+
+  return allowed.has(withoutOrder);
+}
+
+function isPaymentAliasQuery(norm: string): boolean {
+  const t = norm.replace(/[!?.…,]+/g, " ").trim();
+  if (!t) return false;
+
+  // frases típicas
+  const needles = [
+    "alias",
+    "cbu",
+    "cvu",
+    "donde transfiero",
+    "a donde transfiero",
+    "donde te transfiero",
+    "a donde te transfiero",
+    "donde te puedo transferir",
+    "a donde te puedo transferir",
+    "pasame el alias",
+    "pasame alias",
+    "como te pago",
+    "donde te mando la plata",
+    "a donde te mando la plata",
+    "medio de pago",
+    "datos para transferir",
+  ];
+
+  return needles.some((p) => t.includes(p));
+}
+
 
 function buildAgentPrompt(
   ctx: AgentContextBase,
@@ -308,8 +498,47 @@ function sanitizeAction(action: any): any {
   if (typeof cleaned.intent !== "string") cleaned.intent = "";
   if (!Number.isFinite(cleaned.confidence)) cleaned.confidence = 0.65;
   cleaned.confidence = Math.max(0, Math.min(1, Number(cleaned.confidence)));
+  // ✅ Guard rails: si la IA dijo "upsert" pero no trajo items, lo tratamos como aclaración
+if (cleaned.type === "retail_upsert_order" && Array.isArray(cleaned.items) && cleaned.items.length === 0) {
+  cleaned.type = "ask_clarification";
+  cleaned.intent = cleaned.intent || "order_without_items";
+  cleaned.confidence = Math.min(cleaned.confidence ?? 0.65, 0.4);
+}
+
 
   return cleaned;
+}
+
+function postValidateRetailAction(
+  ctx: AgentContextBase,
+  reply: string,
+  action: any
+): { reply: string; action: any } {
+  const text = String((ctx as any).text || "").trim();
+  const norm = normalizeQuick(text);
+
+  // señales mínimas de que de verdad quiso pedir/modificar
+  const hasOrderVerb =
+    /(quiero|dame|mandame|pasame|agrega|agregá|sumar|sumame|suma|quitar|sacar|borrar|cambiar)/.test(norm);
+
+  const hasQty =
+    /\b\d+\b/.test(norm) ||
+    /\b(una|un|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\b/.test(norm);
+
+  // Si la IA quiere upsert pero el mensaje no parece pedido, frenamos.
+  if (action?.type === "retail_upsert_order" && !(hasOrderVerb || hasQty)) {
+    return {
+      reply:
+        "Te entendí, pero para armar/modificar el pedido necesito que me digas *qué producto* y *cuántos* 🙂\nEj: “2 cocas” o “sumar 1 yerba”.",
+      action: sanitizeAction({
+        type: "ask_clarification",
+        intent: "no_clear_order_signal",
+        confidence: 0.35,
+      }),
+    };
+  }
+
+  return { reply, action };
 }
 
 function formatCatalogForPrompt(catalog: any): string {
