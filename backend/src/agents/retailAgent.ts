@@ -370,7 +370,7 @@ function isPendingOrdersQuery(norm: string): boolean {
   const t = norm.replace(/[!?.…,]+/g, " ").trim();
   if (!t) return false;
 
-  const hasPendingPhrase = /\bpedido(s)?\s+(pendiente(s)?|en\s+curso)\b/.test(t);
+  const hasPendingPhrase = /\bpedido(s)?\s+(pendiente(s)?|en\s+curso|en\s+revision)\b/.test(t);
   const hasOrderStatusPhrase = /\b(estado|como va)\s+(mi\s+)?pedido\b/.test(t);
   const hasAnyOrderQuestion = /\b(tengo|hay|tenes|tiene|tenemos)\s+algun\s+pedido(s)?\b/.test(
     t

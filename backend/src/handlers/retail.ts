@@ -622,6 +622,15 @@ function formatAliasReply(businessAlias: string) {
     : `Dale 🙌 Mi alias es:\n*${clean}*\n\nCuando transfieras, avisame y si querés mandá el comprobante.`;
 }
 
+function isPendingOrdersQuestion(raw: string) {
+  const t = norm(raw || "");
+  if (!t) return false;
+  const hasPendingPhrase = /\bpedido(s)?\s+(pendiente(s)?|en\s+curso|en\s+revision)\b/.test(t);
+  const hasOrderStatusPhrase = /\b(estado|como va)\s+(mi\s+)?pedido\b/.test(t);
+  const hasAnyOrderQuestion = /\b(tengo|hay|tenes|tiene|tenemos)\s+algun\s+pedido(s)?\b/.test(t);
+  return hasPendingPhrase || hasOrderStatusPhrase || hasAnyOrderQuestion;
+}
+
 const isLocationQuestion = (raw: string) => {
   const t = norm(raw || "");
   if (!t) return false;
@@ -1598,6 +1607,43 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
   const askedForCatalog = wantsCatalog(rawText || "");
   if (askedForCatalog) {
     await sendCatalog();
+    return true;
+  }
+
+  if (isPendingOrdersQuestion(rawText || "")) {
+    const pending = await prisma.order.findMany({
+      where: { doctorId: doctor.id, clientId: client.id, status: "pending" },
+      include: { items: { include: { product: true } } },
+      orderBy: { createdAt: "desc" },
+      take: 3,
+    });
+    if (!pending.length) {
+      await sendMessage(
+        "No veo pedidos en revisión ahora. ¿Querés armar uno nuevo o consultar algo más?"
+      );
+      return true;
+    }
+
+    const formatItems = (items: any[]) =>
+      Array.isArray(items) && items.length
+        ? items.map((it) => `${it.quantity}x ${it.product?.name || "Producto"}`).join(", ")
+        : "sin items";
+
+    if (pending.length === 1) {
+      const single = pending[0];
+      await sendMessage(
+        `Tenés 1 pedido en revisión (#${single.sequenceNumber}): ${formatItems(single.items)}. ` +
+          `¿Querés confirmarlo o cambiar algo?`
+      );
+      return true;
+    }
+
+    const list = pending
+      .map((o) => `#${o.sequenceNumber}: ${formatItems(o.items)}`)
+      .join("\n");
+    await sendMessage(
+      `Tenés ${pending.length} pedidos en revisión:\n${list}\n¿Querés confirmar alguno o agregar algo?`
+    );
     return true;
   }
 
@@ -2614,34 +2660,36 @@ Respondeme con el número de opción (ej: "1")` +
     const product = products.find((p) => p.id === ri.productId);
   });
 
-  // Buscar pedidos pendientes (para que el agente decida cuál tocar)
-  const pendingOrders = await prisma.order.findMany({
-    where: { doctorId: doctor.id, clientId: client.id, status: "pending" },
+  // Buscar pedidos abiertos (pendientes/confirmados) para decidir cuál tocar
+  const openOrders = await prisma.order.findMany({
+    where: { doctorId: doctor.id, clientId: client.id, status: { in: ["pending", "confirmed"] } },
     include: { items: true },
     orderBy: { createdAt: "desc" },
   });
+  const pendingOrders = openOrders.filter((o) => o.status === "pending");
+  const confirmedOrders = openOrders.filter((o) => o.status === "confirmed");
 
   // Elegir pedido objetivo respetando el estado conversacional (orderId/sequence)
-  let target = pendingOrders[0] ?? null;
+  let target = pendingOrders[0] ?? confirmedOrders[0] ?? null;
   if (awaiting && "orderId" in awaiting && awaiting.orderId) {
-    const found = pendingOrders.find((o) => o.id === awaiting.orderId);
+    const found = openOrders.find((o) => o.id === awaiting.orderId);
     if (found) target = found;
   } else if (awaiting && "orderSequence" in awaiting && awaiting.orderSequence) {
-    const found = pendingOrders.find((o) => o.sequenceNumber === awaiting.orderSequence);
+    const found = openOrders.find((o) => o.sequenceNumber === awaiting.orderSequence);
     if (found) target = found;
   }
 
   const wantsEdit =
     /\b(editar|cambiar|modificar|ajustar|actualizar)\b/i.test(rawText || "") &&
     (!Array.isArray(action.items) || action.items.length === 0);
-  if (wantsEdit && pendingOrders.length > 0) {
-    const summary = pendingOrders
+  if (wantsEdit && openOrders.length > 0) {
+    const summary = openOrders
       .slice(0, 3)
       .map((o) => {
         const itemsList =
           o.items?.map((it) => `${it.quantity}x ${products.find((p) => p.id === it.productId)?.name || "Producto"}`).join(", ") ||
           "sin ítems";
-        return `#${o.sequenceNumber} · ${itemsList}`;
+        return `#${o.sequenceNumber} (${o.status}) · ${itemsList}`;
       })
       .join("\n");
     await sendMessage(
@@ -2721,9 +2769,14 @@ Respondeme con el número de opción (ej: "1")` +
   }
 
   // Stock check con cantidades finales
+  const stockRows = await prisma.product.findMany({
+    where: { id: { in: finalItems.map((i) => i.productId) }, doctorId: doctor.id },
+    select: { id: true, name: true, quantity: true },
+  });
+  const stockById = new Map(stockRows.map((p) => [p.id, p]));
   const stockIssues: Array<{ name: string; have: number; need: number; productId: number }> = [];
   finalItems.forEach((item) => {
-    const product = products.find((p) => p.id === item.productId);
+    const product = stockById.get(item.productId) || products.find((p) => p.id === item.productId);
     if (product && product.quantity < item.quantity) {
       stockIssues.push({
         name: product.name,
