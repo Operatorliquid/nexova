@@ -203,6 +203,41 @@ function fastPathRetailMessage(ctx: AgentContextBase): AgentExecutionResult | nu
     };
   }
 
+  // ✅ 1.25) Consulta de pedidos pendientes -> responder directo
+  if (!hasMedia && isPendingOrdersQuery(norm)) {
+    const orders = Array.isArray((ctx as any).pendingOrders)
+      ? (ctx as any).pendingOrders
+      : [];
+    const pending = orders.filter((o: any) => (o?.status || "pending") === "pending");
+    const formatItems = (items: any[]) =>
+      Array.isArray(items) && items.length
+        ? items.map((it) => `${it.quantity}x ${it.name}`).join(", ")
+        : "sin items";
+
+    let reply = "No veo pedidos pendientes ahora. ¿Querés armar uno nuevo o consultar algo más?";
+
+    if (pending.length === 1) {
+      const single = pending[0];
+      reply = `Tenés 1 pedido pendiente (#${single.sequenceNumber}): ${formatItems(single.items)}. ¿Querés confirmarlo o cambiar algo?`;
+    } else if (pending.length > 1) {
+      const list = pending
+        .slice(0, 3)
+        .map((o: any) => `#${o.sequenceNumber}: ${formatItems(o.items)}`)
+        .join("\n");
+      reply = `Tenés ${pending.length} pedidos pendientes:\n${list}\n¿Querés confirmar alguno o agregar algo?`;
+    }
+
+    return {
+      replyToPatient: reply,
+      action: sanitizeAction({
+        type: "general",
+        intent: "pending_orders_query",
+        confidence: 1,
+      }),
+      profileUpdates: null,
+    };
+  }
+
   // ✅ 1.5) Consulta de alias/CBU/CVU (medio de pago) -> responder directo
   if (!hasMedia && isPaymentAliasQuery(norm)) {
     const storeProfile = (ctx as any).storeProfile || (ctx as any).businessProfile || {};
@@ -329,6 +364,19 @@ function isConfirmOnly(norm: string): boolean {
   return allowed.has(withoutOrder);
 }
 
+function isPendingOrdersQuery(norm: string): boolean {
+  const t = norm.replace(/[!?.…,]+/g, " ").trim();
+  if (!t) return false;
+
+  const hasPendingPhrase = /\bpedido(s)?\s+(pendiente(s)?|en\s+curso)\b/.test(t);
+  const hasOrderStatusPhrase = /\b(estado|como va)\s+(mi\s+)?pedido\b/.test(t);
+  const hasAnyOrderQuestion = /\b(tengo|hay|tenes|tiene|tenemos)\s+algun\s+pedido(s)?\b/.test(
+    t
+  );
+
+  return hasPendingPhrase || hasOrderStatusPhrase || hasAnyOrderQuestion;
+}
+
 function isPaymentAliasQuery(norm: string): boolean {
   const t = norm.replace(/[!?.…,]+/g, " ").trim();
   if (!t) return false;
@@ -346,6 +394,10 @@ function isPaymentAliasQuery(norm: string): boolean {
     "a donde te puedo transferir",
     "pasame el alias",
     "pasame alias",
+    "me pasas el alias",
+    "me pasas alias",
+    "me pasas el cbu",
+    "me pasas el cvu",
     "como te pago",
     "donde te mando la plata",
     "a donde te mando la plata",
