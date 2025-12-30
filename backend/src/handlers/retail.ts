@@ -172,13 +172,15 @@ type RetailConversationState = {
     | {
         kind: "product_clarification";
         phase?: "choose" | "quantity";
-        term: string;
-        candidates: Array<{ productId: number; name: string }>;
+        term?: string;
+        productName?: string;
+        candidates?: Array<{ productId: number; name: string }>;
         desiredQuantity?: number;
-        op?: "add" | "set";
+        op?: "add" | "set" | "remove";
         orderSequence?: number | null;
         orderId?: number | null;
         createdAt: number;
+        prompt?: string;
       }
     | {
         kind: "proof_decision";
@@ -208,17 +210,6 @@ type RetailConversationState = {
         kind: "confirm_order";
         orderSequence?: number | null;
         orderId?: number | null;
-        createdAt: number;
-        prompt?: string;
-      }
-    | {
-        kind: "product_clarification";
-        phase?: "choose" | "quantity";
-        productName?: string;
-        candidates?: Array<{ productId: number; name: string }>;
-        orderSequence?: number | null;
-        orderId?: number | null;
-        op?: "add" | "set" | "remove";
         createdAt: number;
         prompt?: string;
       }
@@ -1409,10 +1400,13 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
   // ✅ Seguir el hilo: si estamos esperando que el cliente elija una opción
   // (ej: "faltan galletitas" -> ofrecemos 1) Don Satur 2) ... -> cliente responde "2")
   // ===============================
+  const productAwaiting = awaiting?.kind === "product_clarification" ? awaiting : null;
   const isProductChoiceAwaiting =
-    awaiting?.kind === "product_clarification" &&
-    (awaiting.phase === "choose" ||
-      (awaiting.term && Array.isArray(awaiting.candidates) && awaiting.candidates.length > 1));
+    !!productAwaiting &&
+    (productAwaiting.phase === "choose" ||
+      (productAwaiting.term &&
+        Array.isArray(productAwaiting.candidates) &&
+        productAwaiting.candidates.length > 1));
 
   if (isProductChoiceAwaiting) {
     // Permitir abortar o cambiar de tema
@@ -1424,9 +1418,9 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
       // deja pasar al resto de la lógica (puede ser otra pregunta)
     } else {
     const t = norm(rawText || "");
-    const candidates = awaiting.candidates || [];
+    const candidates = productAwaiting?.candidates || [];
     const desiredQty =
-      typeof awaiting.desiredQuantity === "number" ? awaiting.desiredQuantity : undefined;
+      typeof productAwaiting?.desiredQuantity === "number" ? productAwaiting.desiredQuantity : undefined;
 
     // números en el mensaje (puede ser "1", o "1 x 2")
     const nums = Array.from(t.matchAll(/\b(\d+)\b/g)).map((m) => Number(m[1]));
@@ -1463,10 +1457,12 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
 
     // Si mandó solo cantidad, la guardamos y volvemos a pedir opción
     if (!choiceIdx && qty && qty > 0) {
-      awaiting.desiredQuantity = qty;
-      await setRetailAwaiting(client.id, awaiting as any);
+      if (productAwaiting) {
+        productAwaiting.desiredQuantity = qty;
+        await setRetailAwaiting(client.id, productAwaiting as any);
+      }
       await sendMessage(
-        `Dale. ¿Cuál opción querés para *${awaiting.term}*?\n\n` +
+        `Dale. ¿Cuál opción querés para *${productAwaiting?.term || "ese producto"}*?\n\n` +
           formatProductOptions(
             candidates.map((c) => ({
               name: c.name,
@@ -1481,7 +1477,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
 
     if (!choiceIdx || choiceIdx < 1 || choiceIdx > candidates.length) {
       await sendMessage(
-        `No te entendí cuál elegís 🙏 Respondé con el número de opción (1, 2, 3...) para *${awaiting.term}*.`
+        `No te entendí cuál elegís 🙏 Respondé con el número de opción (1, 2, 3...) para *${productAwaiting?.term || "ese producto"}*.`
       );
       return true;
     }
@@ -1491,15 +1487,17 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
 
     if (!finalQty || finalQty <= 0) {
       // Tenemos el producto, falta cantidad
-      awaiting.candidates = [selected];
-      awaiting.desiredQuantity = undefined;
+      if (productAwaiting) {
+        productAwaiting.candidates = [selected];
+        productAwaiting.desiredQuantity = undefined;
+      }
       await setRetailAwaiting(client.id, {
         kind: "product_clarification",
         phase: "quantity",
         productName: selected.name,
         candidates: [selected],
-        op: awaiting.op || "add",
-        orderSequence: awaiting.orderSequence,
+        op: productAwaiting?.op || "add",
+        orderSequence: productAwaiting?.orderSequence,
         createdAt: Date.now(),
         prompt: `¿Cuántas querés de ${selected.name}?`,
       });
@@ -1517,7 +1515,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
           name: selected.name,
           normalizedName: selected.name,
           quantity: finalQty,
-          op: awaiting.op || "add",
+          op: productAwaiting?.op || "add",
           note: "",
         },
       ],
@@ -1528,16 +1526,17 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
   }
 
   const isQuantityAwaiting =
-    awaiting?.kind === "product_clarification" &&
-    (awaiting.phase === "quantity" ||
-      (!awaiting.term && (awaiting.candidates?.length === 1 || awaiting.productName)));
+    !!productAwaiting &&
+    (productAwaiting.phase === "quantity" ||
+      (!productAwaiting.term &&
+        (productAwaiting.candidates?.length === 1 || productAwaiting.productName)));
 
   if (isQuantityAwaiting) {
     const nums = Array.from(norm(msgText || "").matchAll(/\b(\d+)\b/g)).map((m) => Number(m[1]));
     const qty = nums[0];
     if (qty && qty > 0) {
       // Convertimos en acción directa para el producto pendiente
-      const candidates = awaiting.candidates || [];
+      const candidates = productAwaiting?.candidates || [];
       const selected = candidates[0];
       if (selected) {
         action = {
@@ -1549,7 +1548,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
               name: selected.name,
               normalizedName: selected.name,
               quantity: qty,
-              op: awaiting.op || "add",
+              op: productAwaiting?.op || "add",
               note: "",
             },
           ],
@@ -2021,10 +2020,10 @@ if (awaitingRemove) {
     const nums = Array.from(norm(msgText || "").matchAll(/\b(\d+)\b/g)).map((m) => Number(m[1]));
     const qty = nums[0];
     if (qty && qty > 0) {
-      const candidates = awaiting.candidates || [];
+      const candidates = productAwaiting?.candidates || [];
       const selected = candidates[0] || {
-        name: awaiting.productName,
-        normalizedName: awaiting.productName,
+        name: productAwaiting?.productName,
+        normalizedName: productAwaiting?.productName,
       };
       action = {
         type: "retail_upsert_order",
@@ -2035,7 +2034,7 @@ if (awaitingRemove) {
             name: selected.name,
             normalizedName: selected.name,
             quantity: qty,
-            op: awaiting.op || "add",
+            op: productAwaiting?.op || "add",
             note: "",
           },
         ],
