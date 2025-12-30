@@ -41,7 +41,7 @@ import {
   handleRetailAgentAction,
   setAwaitingProofOrderNumber,
   setRetailProofConfirmationAwaiting,
-  hasRetailProofConfirmationAwaiting,
+  getRetailConversationState,
 } from "./handlers/retail";
 import { handleHealthWebhookMessage } from "./handlers/health";
 import {
@@ -4235,20 +4235,20 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
 
       if (!bodyText) return res.sendStatus(200);
 
-      if (await hasRetailProofConfirmationAwaiting(retailClient.id)) {
-        const retailHandled = await handleRetailAgentAction({
-          doctor,
-          retailClient,
-          patient: null,
-          action: { type: "general", items: [] },
-          replyToPatient: "",
-          phoneE164,
-          doctorNumber,
-          doctorWhatsappConfig,
-          rawText: bodyText,
-        });
-        if (retailHandled) return res.sendStatus(200);
-      }
+      const retailConversationState = await getRetailConversationState(retailClient.id);
+
+      const preHandled = await handleRetailAgentAction({
+        doctor,
+        retailClient,
+        patient: null,
+        action: { type: "general", items: [] },
+        replyToPatient: "",
+        phoneE164,
+        doctorNumber,
+        doctorWhatsappConfig,
+        rawText: bodyText,
+      });
+      if (preHandled) return res.sendStatus(200);
 
       const historyRaw = await prisma.message.findMany({
         where: { retailClientId: retailClient.id },
@@ -4322,6 +4322,7 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
           urls: mediaItems.map((m) => m.url).filter(Boolean),
           contentTypes: mediaItems.map((m) => m.contentType).filter(Boolean),
         },
+        retailConversationState,
       };
 
       console.log("[RETAIL_CTX]", {

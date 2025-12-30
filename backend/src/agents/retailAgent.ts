@@ -175,7 +175,9 @@ if (fast) return fast;
   }
 }
 
-function fastPathRetailMessage(ctx: AgentContextBase): AgentExecutionResult | null {
+export function fastPathRetailMessage(
+  ctx: AgentContextBase
+): AgentExecutionResult | null {
   const raw = String((ctx as any).text || "").trim();
   if (!raw) return null;
 
@@ -498,7 +500,7 @@ function safeJsonParse(raw: string): any | null {
   }
 }
 
-function sanitizeAction(action: any): any {
+export function sanitizeAction(action: any): any {
   const a = action && typeof action === "object" ? action : {};
   const type = typeof a.type === "string" ? a.type : "general";
   const cleaned: any = { ...a, type };
@@ -561,7 +563,7 @@ if (cleaned.type === "retail_upsert_order" && Array.isArray(cleaned.items) && cl
   return cleaned;
 }
 
-function postValidateRetailAction(
+export function postValidateRetailAction(
   ctx: AgentContextBase,
   reply: string,
   action: any

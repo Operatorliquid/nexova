@@ -170,7 +170,8 @@ const STATE_TTL_MS = 24 * 60 * 60 * 1000;
 type RetailConversationState = {
   awaiting?:
     | {
-        kind: "choose_product";
+        kind: "product_clarification";
+        phase?: "choose" | "quantity";
         term: string;
         candidates: Array<{ productId: number; name: string }>;
         desiredQuantity?: number;
@@ -180,7 +181,7 @@ type RetailConversationState = {
         createdAt: number;
       }
     | {
-        kind: "proof_confirmation";
+        kind: "proof_decision";
         proofId?: number | null;
         candidateSeq: number | null;
         createdAt: number;
@@ -204,8 +205,16 @@ type RetailConversationState = {
         prompt?: string;
       }
     | {
-        kind: "quantity_needed";
-        productName: string;
+        kind: "confirm_order";
+        orderSequence?: number | null;
+        orderId?: number | null;
+        createdAt: number;
+        prompt?: string;
+      }
+    | {
+        kind: "product_clarification";
+        phase?: "choose" | "quantity";
+        productName?: string;
         candidates?: Array<{ productId: number; name: string }>;
         orderSequence?: number | null;
         orderId?: number | null;
@@ -243,7 +252,24 @@ async function loadRetailConversationState(clientId: number): Promise<RetailConv
 
   const st = (row as any)?.conversationState;
   if (!st || typeof st !== "object") return {};
+  const awaiting = (st as any)?.awaiting;
+  if (awaiting && typeof awaiting === "object") {
+    const kind = (awaiting as any)?.kind;
+    if (kind === "proof_confirmation") {
+      (st as any).awaiting = { ...awaiting, kind: "proof_decision" };
+    } else if (kind === "choose_product") {
+      (st as any).awaiting = { ...awaiting, kind: "product_clarification", phase: "choose" };
+    } else if (kind === "quantity_needed") {
+      (st as any).awaiting = { ...awaiting, kind: "product_clarification", phase: "quantity" };
+    }
+  }
   return st as any;
+}
+
+export async function getRetailConversationState(
+  clientId: number
+): Promise<RetailConversationState> {
+  return loadRetailConversationState(clientId);
 }
 
 async function saveRetailConversationState(clientId: number, state: RetailConversationState) {
@@ -292,7 +318,7 @@ export async function setRetailProofConfirmationAwaiting(params: {
   prompt?: string;
 }) {
   await setRetailAwaiting(params.clientId, {
-    kind: "proof_confirmation",
+    kind: "proof_decision",
     proofId: params.proofId,
     candidateSeq: params.candidateSeq ?? null,
     createdAt: Date.now(),
@@ -302,7 +328,7 @@ export async function setRetailProofConfirmationAwaiting(params: {
 
 export async function hasRetailProofConfirmationAwaiting(clientId: number): Promise<boolean> {
   const st = await loadRetailConversationState(clientId);
-  return st.awaiting?.kind === "proof_confirmation";
+  return st.awaiting?.kind === "proof_decision";
 }
 
 
@@ -558,6 +584,15 @@ const lastBotAskedCancel = (lastBotMsg: string) => /\bcancel/.test(norm(lastBotM
 
 const lastBotAskedCatalog = (lastBotMsg: string) => /\bcatal[oó]g/.test(norm(lastBotMsg));
 
+const lastBotAskedOrderConfirm = (lastBotMsg: string) => {
+  const t = norm(lastBotMsg);
+  if (!t) return false;
+  if (!t.includes("pedido")) return false;
+  const hasConfirm = /\bconfirm/.test(t);
+  const hasRespond = /\brespond/.test(t) || t.includes("si esta ok");
+  return hasConfirm && hasRespond;
+};
+
 const lastBotAskedPromo = (lastBotMsg: string) => {
   const t = norm(lastBotMsg);
   const hasPromoWord = t.includes("promo") || t.includes("descuento") || t.includes("off");
@@ -574,6 +609,17 @@ function asksPaymentMethod(raw: string) {
     /(pasame|pasa|mandame|manda)\s*(el\s*)?(alias|cbu|cvu)/.test(t) ||
     /(como|cómo)\s*(te\s*)?(pago|transfero|transfiero)/.test(t) ||
     /(enviar|mandar)\s*(la\s*)?(plata|dinero)/.test(t)
+  );
+}
+
+function wantsLocationShare(raw: string) {
+  const t = norm(raw || "");
+  if (!t) return false;
+  if (/\b(alias|cbu|cvu)\b/.test(t)) return false;
+  if (/\b(catalogo|promo|promos|descuento)\b/.test(t)) return false;
+  return (
+    /\b(ubicacion|direccion)\b/.test(t) ||
+    /\b(pasame|pasamela|pasa|mandame|mandamela|manda|compartime|comparti|envia|enviame)\b/.test(t)
   );
 }
 
@@ -1050,10 +1096,10 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
   if (
     lastBotAskedProof &&
     candidateSeq &&
-    (!conv.awaiting || conv.awaiting.kind !== "proof_confirmation")
+    (!conv.awaiting || conv.awaiting.kind !== "proof_decision")
   ) {
     conv.awaiting = {
-      kind: "proof_confirmation",
+      kind: "proof_decision",
       candidateSeq,
       createdAt: nowTs,
       prompt: lastBotMsg || undefined,
@@ -1068,6 +1114,20 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
     conv.awaiting = {
       kind: "cancel_confirmation",
       orderSequence: null,
+      orderId: null,
+      createdAt: nowTs,
+      prompt: lastBotMsg || undefined,
+    };
+    await saveRetailConversationState(client.id, conv);
+  }
+
+  if (
+    lastBotAskedOrderConfirm(lastBotMsg) &&
+    (!conv.awaiting || conv.awaiting.kind !== "confirm_order")
+  ) {
+    conv.awaiting = {
+      kind: "confirm_order",
+      orderSequence: extractOrderSeqFromText(lastBotMsg),
       orderId: null,
       createdAt: nowTs,
       prompt: lastBotMsg || undefined,
@@ -1097,7 +1157,13 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
       isLocationQuestion(msgText) ||
       asksPaymentMethod(msgText) ||
       isTransferMention(msgText));
-  if (newTopic && awaiting?.kind !== "proof_confirmation") {
+  const clearOnNewTopicKinds = new Set([
+    "catalog_offer",
+    "promo_offer",
+    "location_offer",
+    "product_clarification",
+  ]);
+  if (newTopic && awaiting && clearOnNewTopicKinds.has((awaiting as any).kind)) {
     awaiting = null;
     await clearRetailAwaiting(client.id);
   }
@@ -1122,7 +1188,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
   }
 
   // Ack genérico después de respuesta informativa (sin awaiting)
-  if (!awaiting && softAckShort && lastBotMsg) {
+  if (!awaiting && softAckShort && lastBotMsg && !lastBotAskedOrderConfirm(lastBotMsg)) {
     await sendMessage("Genial, contame si querés pedir algo o si tenés otra consulta.");
     return true;
   }
@@ -1152,7 +1218,14 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
         prompt: "¿Querés que te comparta la ubicación?",
       });
     } else {
-      await sendMessage("Estamos operando online. Si necesitás retirar, avisame y te paso la dirección.");
+      const reply =
+        "Estamos operando online. Si necesitás retirar, avisame y te paso la dirección.";
+      await sendMessage(reply);
+      await setRetailAwaiting(client.id, {
+        kind: "location_offer",
+        createdAt: Date.now(),
+        prompt: reply,
+      });
     }
     return true;
   }
@@ -1160,7 +1233,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
   // ===============================
   // ✅ Seguir el hilo de preguntas directas (comprobante, catálogo, ubicación, cancelar)
   // ===============================
-  if (awaiting?.kind === "proof_confirmation") {
+  if (awaiting?.kind === "proof_decision") {
     const seqInMsg = extractOrderSeqFromText(msgText);
     const proofId = awaiting.proofId ?? null;
 
@@ -1174,7 +1247,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
       if (ok) {
         await clearAwaitingProofOrderNumber({ doctorId: doctor.id, clientId: client.id });
         await clearRetailAwaiting(client.id);
-        logAwaitingConsume("proof_confirmation", msgText);
+        logAwaitingConsume("proof_decision", msgText);
         await sendMessage(`Listo ✅ Ya cargué tu comprobante para el pedido #${awaiting.candidateSeq}.`);
         return true;
       }
@@ -1196,7 +1269,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
       if (ok) {
         await clearAwaitingProofOrderNumber({ doctorId: doctor.id, clientId: client.id });
         await clearRetailAwaiting(client.id);
-        logAwaitingConsume("proof_confirmation", msgText);
+        logAwaitingConsume("proof_decision", msgText);
         await sendMessage(`Listo ✅ Asigné el comprobante al pedido #${seqInMsg}.`);
         return true;
       }
@@ -1210,7 +1283,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
     if (/\bno\b/.test(norm(msgText))) {
       await clearAwaitingProofOrderNumber({ doctorId: doctor.id, clientId: client.id });
       await clearRetailAwaiting(client.id);
-      logAwaitingConsume("proof_confirmation", msgText);
+      logAwaitingConsume("proof_decision", msgText);
       await sendMessage("Ok, ignoro el comprobante. Decime qué necesitás y seguimos.");
       return true;
     }
@@ -1252,7 +1325,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
       await sendMessage("Ok, no envío ubicación. ¿Querés pedir algo o consultar stock/precios?");
       return true;
     }
-    if (isYes(msgText)) {
+    if (isYes(msgText) || wantsLocationShare(msgText)) {
       await clearRetailAwaiting(client.id);
       const addr =
         (doctor as any).businessAddress ||
@@ -1263,7 +1336,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
       if (addr) {
         await sendMessage(`Estamos en ${addr}. Te paso ubicación si la necesitas.`);
       } else {
-        await sendMessage("Estamos operando online. Si necesitás retirar, avisame y te paso la dirección.");
+        await sendMessage("Todavía no tengo la dirección cargada. Si necesitás retirar, avisame y la confirmo.");
       }
       logAwaitingConsume("location_offer", msgText);
       return true;
@@ -1336,7 +1409,12 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
   // ✅ Seguir el hilo: si estamos esperando que el cliente elija una opción
   // (ej: "faltan galletitas" -> ofrecemos 1) Don Satur 2) ... -> cliente responde "2")
   // ===============================
-  if (awaiting?.kind === "choose_product") {
+  const isProductChoiceAwaiting =
+    awaiting?.kind === "product_clarification" &&
+    (awaiting.phase === "choose" ||
+      (awaiting.term && Array.isArray(awaiting.candidates) && awaiting.candidates.length > 1));
+
+  if (isProductChoiceAwaiting) {
     // Permitir abortar o cambiar de tema
     if (isNo(msgText)) {
       await clearRetailAwaiting(client.id);
@@ -1416,7 +1494,8 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
       awaiting.candidates = [selected];
       awaiting.desiredQuantity = undefined;
       await setRetailAwaiting(client.id, {
-        kind: "quantity_needed",
+        kind: "product_clarification",
+        phase: "quantity",
         productName: selected.name,
         candidates: [selected],
         op: awaiting.op || "add",
@@ -1448,7 +1527,12 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
     }
   }
 
-  if (awaiting?.kind === "quantity_needed") {
+  const isQuantityAwaiting =
+    awaiting?.kind === "product_clarification" &&
+    (awaiting.phase === "quantity" ||
+      (!awaiting.term && (awaiting.candidates?.length === 1 || awaiting.productName)));
+
+  if (isQuantityAwaiting) {
     const nums = Array.from(norm(msgText || "").matchAll(/\b(\d+)\b/g)).map((m) => Number(m[1]));
     const qty = nums[0];
     if (qty && qty > 0) {
@@ -1471,7 +1555,7 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
           ],
         } as any;
         await clearRetailAwaiting(client.id);
-        logAwaitingConsume("quantity_needed", msgText);
+        logAwaitingConsume("product_clarification", msgText);
         // dejamos seguir para que la lógica normal procese el upsert
       } else {
         await sendMessage("Decime la cantidad y el producto para poder agregarlo.");
@@ -1933,12 +2017,15 @@ if (awaitingRemove) {
     }
   }
 
-  if (awaiting?.kind === "quantity_needed") {
+  if (isQuantityAwaiting) {
     const nums = Array.from(norm(msgText || "").matchAll(/\b(\d+)\b/g)).map((m) => Number(m[1]));
     const qty = nums[0];
     if (qty && qty > 0) {
       const candidates = awaiting.candidates || [];
-      const selected = candidates[0] || { name: awaiting.productName, normalizedName: awaiting.productName };
+      const selected = candidates[0] || {
+        name: awaiting.productName,
+        normalizedName: awaiting.productName,
+      };
       action = {
         type: "retail_upsert_order",
         mode: "merge",
@@ -1954,6 +2041,7 @@ if (awaitingRemove) {
         ],
       } as any;
       await clearRetailAwaiting(client.id);
+      logAwaitingConsume("product_clarification", msgText);
       // seguimos al flujo normal para procesar el upsert
     } else if (isConfusion(msgText) || msgText.includes("?")) {
       await sendMessage("Necesito la cantidad. Ej: 2");
@@ -2166,6 +2254,10 @@ if (awaitingRemove) {
   const isCustomerConfirm = isConfirmText(rawText || "");
 
   if (isCustomerConfirm) {
+    if (awaiting?.kind === "confirm_order") {
+      await clearRetailAwaiting(client.id);
+      logAwaitingConsume("confirm_order", msgText);
+    }
     // ✅ Si el último bot pidió confirmar cancelación, lo tratamos como cancel
     if (lastBotAskedCancel(lastBotMsg)) {
       const pending = await prisma.order.findFirst({
@@ -2485,7 +2577,8 @@ if (awaitingRemove) {
 
     // Guardar estado para el próximo mensaje
     await setRetailAwaiting(client.id, {
-      kind: "choose_product",
+      kind: "product_clarification",
+      phase: "choose",
       term,
       candidates: candidates.map((p: any) => ({ productId: p.id, name: p.name })),
       desiredQuantity: qty,

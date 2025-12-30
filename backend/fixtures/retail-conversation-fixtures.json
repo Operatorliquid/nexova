@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "fixtures": [
+    {
+      "id": "alias-query",
+      "type": "fast-path",
+      "text": "me pasas el alias?",
+      "ctx": {
+        "storeProfile": { "businessAlias": "distriNF" }
+      },
+      "expect": {
+        "actionType": "general",
+        "intent": "payment_alias_fastpath",
+        "replyContains": ["alias/cbu", "distriNF", "comprobante"]
+      }
+    },
+    {
+      "id": "pending-orders-query",
+      "type": "fast-path",
+      "text": "tengo algun pedido pendiente?",
+      "ctx": {
+        "pendingOrders": [
+          { "sequenceNumber": 7, "status": "pending", "items": [{ "name": "CocaCola", "quantity": 2 }] }
+        ]
+      },
+      "expect": {
+        "actionType": "general",
+        "intent": "pending_orders_query",
+        "replyContains": ["pedido pendiente", "#7", "2x cocacola"]
+      }
+    },
+    {
+      "id": "confirm-pending-order-fastpath",
+      "type": "fast-path",
+      "text": "ok",
+      "ctx": {
+        "pendingOrders": [
+          { "sequenceNumber": 4, "status": "pending", "items": [{ "name": "Yerba", "quantity": 1 }] }
+        ]
+      },
+      "expect": {
+        "actionType": "retail_confirm_order",
+        "intent": "confirm_order_fastpath",
+        "replyContains": ["confirm", "#4"]
+      }
+    },
+    {
+      "id": "post-validate-upsert-without-order-signal",
+      "type": "post-validate",
+      "text": "hola",
+      "reply": "hola",
+      "action": { "type": "retail_upsert_order", "items": [] },
+      "expect": {
+        "actionType": "ask_clarification",
+        "intent": "no_clear_order_signal",
+        "replyContains": ["producto", "cantidad"]
+      }
+    },
+    {
+      "id": "post-validate-upsert-with-qty",
+      "type": "post-validate",
+      "text": "2 cocas",
+      "reply": "ok",
+      "action": {
+        "type": "retail_upsert_order",
+        "items": [{ "name": "coca", "quantity": 2 }]
+      },
+      "expect": {
+        "actionType": "retail_upsert_order",
+        "replyContains": ["ok"]
+      }
+    },
+    {
+      "id": "location-followup",
+      "type": "manual",
+      "text": "si pasamela",
+      "notes": "After asking for address, should reply with address or explain it is not loaded."
+    },
+    {
+      "id": "proof-decision",
+      "type": "manual",
+      "text": "si asignalo",
+      "notes": "After duplicate warning, should assign the referenced proof without using AI."
+    },
+    {
+      "id": "change-topic",
+      "type": "manual",
+      "text": "me pasas el alias?",
+      "notes": "While awaiting confirm_order, should answer alias without losing critical awaiting."
+    }
+  ]
+}
