@@ -2581,7 +2581,7 @@ if (awaitingRemove) {
   }
 
   const missingProducts: Array<{ term: string; quantity: number; op?: string }> = [];
-  const resolvedItems: Array<{ productId: number; quantity: number; name: string; op?: string }> = [];
+  let resolvedItems: Array<{ productId: number; quantity: number; name: string; op?: string }> = [];
 
   for (const item of normalized) {
     const candidateName = (item as any).normalizedName || item.name;
@@ -2645,6 +2645,18 @@ Respondeme con el número de opción (ej: "1")` +
     );
     return true;
   }
+
+  const consolidated = new Map<string, { productId: number; quantity: number; name: string; op?: string }>();
+  for (const item of resolvedItems) {
+    const key = `${item.productId}:${item.op ?? ""}`;
+    const existing = consolidated.get(key);
+    if (existing) {
+      existing.quantity += item.quantity;
+    } else {
+      consolidated.set(key, { ...item });
+    }
+  }
+  resolvedItems = Array.from(consolidated.values());
 
 
   if (resolvedItems.length === 0) {
