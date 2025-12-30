@@ -1517,9 +1517,20 @@ const normLite = (s: string) =>
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/\s+/g, " ");
 
+const isLocationQuestion = (raw: string) => {
+  const t = normLite(raw || "");
+  if (!t) return false;
+  const hasWhere =
+    /\b(donde|ubicacion|ubicado|queda|quedan|direccion)\b/.test(t);
+  const hasPlace =
+    /\b(local|deposito|sucursal|tienda|negocio|stock|almacen)\b/.test(t);
+  return hasWhere && hasPlace;
+};
+
 const isTransferMention = (raw: string) => {
   const t = normLite(raw || "");
   if (!t) return false;
+  if (isLocationQuestion(raw)) return false;
   return (
     /\btransfe/.test(t) ||
     /\btransferenc/.test(t) ||
