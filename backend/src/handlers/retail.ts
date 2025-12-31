@@ -2651,7 +2651,9 @@ Respondeme con el número de opción (ej: "1")` +
     const key = `${item.productId}:${item.op ?? ""}`;
     const existing = consolidated.get(key);
     if (existing) {
-      existing.quantity += item.quantity;
+      if (existing.quantity !== item.quantity) {
+        existing.quantity += item.quantity;
+      }
     } else {
       consolidated.set(key, { ...item });
     }
