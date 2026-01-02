@@ -3925,6 +3925,7 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
     const safeWaId = waId || fromRaw.replace(/^whatsapp:/, "");
     const phoneE164 = formatE164(safeWaId);
     const doctorNumber = normalizeWhatsappSender(toRaw);
+    const doctorNumberPlain = doctorNumber.replace(/^whatsapp:/i, "");
     const numMedia = mediaItems.length;
 
     if (!phoneE164 || !doctorNumber) {
@@ -3932,7 +3933,7 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
     }
 
     const doctor = await prisma.doctor.findFirst({
-      where: { whatsappBusinessNumber: doctorNumber },
+      where: { whatsappBusinessNumber: { in: [doctorNumber, doctorNumberPlain] } },
         select: {
           id: true,
           name: true,
