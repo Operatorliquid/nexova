@@ -82,6 +82,10 @@ const PORT = process.env.PORT || 4000;
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY || null;
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || "";
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || "";
+const WHATSAPP_PROVIDER =
+  process.env.WHATSAPP_PROVIDER?.toLowerCase() === "infobip"
+    ? "infobip"
+    : "twilio";
 const CORS_ORIGINS = (process.env.CORS_ORIGINS || "http://localhost:5173")
   .split(",")
   .map((origin) => origin.trim())
@@ -1591,6 +1595,101 @@ function normalizeWhatsappSender(value: string) {
     cleaned = `+${cleaned.replace(/^\+/, "")}`;
   }
   return `whatsapp:${cleaned}`;
+}
+
+type IncomingMediaItem = {
+  url: string;
+  contentType: string | null;
+  mediaSid: string | null;
+};
+
+type ParsedWebhookPayload = {
+  fromRaw: string;
+  toRaw: string;
+  bodyText: string;
+  profileName: string | null;
+  waMessageId: string | null;
+  waId: string | null;
+  mediaItems: IncomingMediaItem[];
+};
+
+function extractInfobipText(message: any): string {
+  if (!message || typeof message !== "object") return "";
+  const candidates = [
+    message.text,
+    message?.content?.text,
+    message.title,
+    message.description,
+    message.caption,
+  ];
+  const chosen = candidates.find(
+    (value) => typeof value === "string" && value.trim().length > 0
+  );
+  return chosen ? chosen.trim() : "";
+}
+
+function inferContentTypeFromUrl(url: string): string | null {
+  const lower = url.toLowerCase();
+  if (lower.includes(".jpg") || lower.includes(".jpeg")) return "image/jpeg";
+  if (lower.includes(".png")) return "image/png";
+  if (lower.includes(".pdf")) return "application/pdf";
+  if (lower.includes(".webp")) return "image/webp";
+  return null;
+}
+
+function parseInfobipWebhook(payload: any): ParsedWebhookPayload | null {
+  const result = Array.isArray(payload?.results) ? payload.results[0] : null;
+  if (!result) return null;
+  const message = result.message || {};
+  const fromRaw = result.from;
+  const toRaw = result.to;
+  if (!fromRaw || !toRaw) return null;
+
+  const bodyText = extractInfobipText(message);
+  const profileName = result.contact?.name || null;
+  const waMessageId = result.messageId || message.id || null;
+  const waId = result.from || null;
+
+  const mediaItems: IncomingMediaItem[] = [];
+  const mediaUrl =
+    message.url ||
+    message.mediaUrl ||
+    message.media?.url ||
+    message.content?.mediaUrl ||
+    message.content?.url ||
+    message.file?.url ||
+    null;
+  const rawContentType =
+    message.contentType ||
+    message.mimeType ||
+    message.media?.contentType ||
+    message.media?.mimeType ||
+    message.file?.mimeType ||
+    null;
+  const contentType =
+    rawContentType || (mediaUrl ? inferContentTypeFromUrl(mediaUrl) : null);
+  const mediaType =
+    typeof message.type === "string" ? message.type.toUpperCase() : "";
+  const isMedia =
+    ["IMAGE", "DOCUMENT", "VIDEO", "AUDIO", "STICKER"].includes(mediaType) ||
+    !!mediaUrl;
+  if (isMedia && mediaUrl) {
+    mediaItems.push({
+      url: mediaUrl,
+      contentType,
+      mediaSid: message.id || result.messageId || null,
+    });
+  }
+
+  return {
+    fromRaw,
+    toRaw,
+    bodyText,
+    profileName,
+    waMessageId,
+    waId,
+    mediaItems,
+  };
 }
 
 function extractWhatsappError(error: any) {
@@ -3768,42 +3867,65 @@ app.get("/api/whatsapp/webhook", (_req: Request, res: Response) => {
 
 app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
   try {
-    if (!validateTwilioSignature(req)) {
+    if (WHATSAPP_PROVIDER === "twilio" && !validateTwilioSignature(req)) {
       return res.status(403).send("Invalid signature");
     }
 
-    const payload = req.body as Record<string, string | undefined>;
-    const fromRaw = payload.From;
-    const toRaw = payload.To;
-    const bodyText = payload.Body?.trim() || "";
-    const numMedia = Number(payload.NumMedia || "0");
-    const mediaItems: Array<{
-      url: string;
-      contentType: string | null;
-      mediaSid: string | null;
-    }> = [];
-    if (numMedia > 0) {
-      for (let i = 0; i < numMedia; i += 1) {
-        const url = payload[`MediaUrl${i}`];
-        if (!url) continue;
-        const contentType = payload[`MediaContentType${i}`] || null;
-        const mediaSid = payload[`MediaSid${i}`] || null;
-        mediaItems.push({
-          url,
-          contentType,
-          mediaSid,
-        });
+    const payload = req.body as Record<string, any>;
+    let fromRaw: string | undefined;
+    let toRaw: string | undefined;
+    let bodyText = "";
+    let profileName: string | null = null;
+    let waMessageId: string | null = null;
+    let waId: string | null = null;
+    const mediaItems: IncomingMediaItem[] = [];
+
+    if (WHATSAPP_PROVIDER === "infobip") {
+      const parsed = parseInfobipWebhook(payload);
+      if (!parsed) {
+        return res.sendStatus(200);
       }
+      ({
+        fromRaw,
+        toRaw,
+        bodyText,
+        profileName,
+        waMessageId,
+        waId,
+      } = parsed);
+      mediaItems.push(...parsed.mediaItems);
+    } else {
+      const twilioPayload = payload as Record<string, string | undefined>;
+      fromRaw = twilioPayload.From;
+      toRaw = twilioPayload.To;
+      bodyText = twilioPayload.Body?.trim() || "";
+      const numMedia = Number(twilioPayload.NumMedia || "0");
+      if (numMedia > 0) {
+        for (let i = 0; i < numMedia; i += 1) {
+          const url = twilioPayload[`MediaUrl${i}`];
+          if (!url) continue;
+          const contentType = twilioPayload[`MediaContentType${i}`] || null;
+          const mediaSid = twilioPayload[`MediaSid${i}`] || null;
+          mediaItems.push({
+            url,
+            contentType,
+            mediaSid,
+          });
+        }
+      }
+      profileName = twilioPayload.ProfileName || null;
+      waId = twilioPayload.WaId || fromRaw?.replace(/^whatsapp:/, "") || null;
+      waMessageId = twilioPayload.MessageSid || null;
     }
 
     if (!fromRaw || !toRaw) {
       return res.sendStatus(200);
     }
 
-    const profileName = payload.ProfileName || null;
-    const waId = payload.WaId || fromRaw.replace(/^whatsapp:/, "");
-    const phoneE164 = formatE164(waId);
+    const safeWaId = waId || fromRaw.replace(/^whatsapp:/, "");
+    const phoneE164 = formatE164(safeWaId);
     const doctorNumber = normalizeWhatsappSender(toRaw);
+    const numMedia = mediaItems.length;
 
     if (!phoneE164 || !doctorNumber) {
       return res.sendStatus(200);
@@ -3841,9 +3963,7 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
       from: doctor.whatsappBusinessNumber,
     };
 
-    const waMessageId = payload.MessageSid;
-
-    console.log("📩 Mensaje entrante (Twilio)", {
+    console.log(`📩 Mensaje entrante (WhatsApp - ${WHATSAPP_PROVIDER})`, {
       from: phoneE164,
       to: doctorNumber,
       profileName,
@@ -4003,7 +4123,7 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
 
       const savedIncoming = await prisma.message.create({
         data: {
-          waMessageId: payload.MessageSid,
+          waMessageId,
           from: phoneE164,
           to: doctorNumber,
           direction: "incoming",
@@ -4130,7 +4250,7 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
                   doctorId: doctor.id,
                   clientId: retailClient.id,
                   orderId: null,
-                  messageSid: payload.MessageSid || null,
+                  messageSid: waMessageId || null,
                   mediaIndex: i,
                   fileName: media.mediaSid || undefined,
                   contentType: media.contentType || null,
@@ -5063,35 +5183,20 @@ app.get(
         return res.status(400).json({ error: "El documento no tiene un archivo adjunto" });
       }
 
-      if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
-        return res.status(500).json({
-          error: "Twilio no está configurado para descargar archivos.",
-        });
-      }
-
-      const twilioResponse = await axios.get(document.mediaUrl, {
-        responseType: "arraybuffer",
-        auth: {
-          username: TWILIO_ACCOUNT_SID,
-          password: TWILIO_AUTH_TOKEN,
-        },
-      });
-
+      const buffer = await downloadTwilioMedia(document.mediaUrl);
       const contentType =
-        (twilioResponse.headers["content-type"] as string | undefined) ||
-        document.mediaContentType ||
-        "application/octet-stream";
+        document.mediaContentType || "application/octet-stream";
 
       const extension = inferExtensionFromContentType(contentType);
       const filename = buildDocumentFilename(document.caption, document.id, extension);
 
       res.setHeader("Content-Type", contentType);
       res.setHeader("Content-Disposition", `inline; filename="${filename}"`);
-      return res.send(Buffer.from(twilioResponse.data));
+      return res.send(Buffer.from(buffer));
     } catch (error) {
       console.error("Error en /api/documents/:id/download:", error);
       return res.status(502).json({
-        error: "No pudimos descargar el archivo desde Twilio. Probá nuevamente.",
+        error: "No pudimos descargar el archivo desde WhatsApp. Probá nuevamente.",
       });
     }
   }

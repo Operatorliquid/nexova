@@ -8,6 +8,11 @@ import path from "path";
 
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || "";
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || "";
+const INFOBIP_API_KEY = process.env.INFOBIP_API_KEY || "";
+const WHATSAPP_PROVIDER =
+  process.env.WHATSAPP_PROVIDER?.toLowerCase() === "infobip"
+    ? "infobip"
+    : "twilio";
 
 export type ProofExtraction = {
   isPaymentProof: boolean;
@@ -20,6 +25,19 @@ export type ProofExtraction = {
 };
 
 export async function downloadTwilioMedia(mediaUrl: string): Promise<Buffer> {
+  if (WHATSAPP_PROVIDER === "infobip") {
+    if (!INFOBIP_API_KEY) {
+      throw new Error("Falta INFOBIP_API_KEY");
+    }
+    const res = await axios.get(mediaUrl, {
+      responseType: "arraybuffer",
+      headers: {
+        Authorization: `App ${INFOBIP_API_KEY}`,
+      },
+    });
+    return Buffer.from(res.data);
+  }
+
   if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
     throw new Error("Falta TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN");
   }
