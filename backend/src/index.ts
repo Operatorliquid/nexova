@@ -1647,14 +1647,20 @@ function parseInfobipWebhook(payload: any): ParsedWebhookPayload | null {
   const result = results ? results[0] : null;
   if (!result) return null;
   const message = result.message || {};
-  const fromRaw = result.from || message.from;
-  const toRaw = result.to || message.to;
+  const fromRaw = result.from || result.sender || message.from;
+  const toRaw = result.to || result.destination || message.to;
   if (!fromRaw || !toRaw) return null;
 
-  const bodyText = extractInfobipText(message);
+  const contentItems = Array.isArray(result.content) ? result.content : [];
+  const firstContent = contentItems[0] || null;
+  const bodyText =
+    extractInfobipText(message) ||
+    (typeof firstContent?.cleanText === "string" ? firstContent.cleanText.trim() : "") ||
+    (typeof firstContent?.text === "string" ? firstContent.text.trim() : "");
   const profileName = result.contact?.name || null;
-  const waMessageId = result.messageId || message.id || null;
-  const waId = result.from || null;
+  const waMessageId =
+    result.messageId || message.id || firstContent?.id || null;
+  const waId = result.from || result.sender || null;
 
   const mediaItems: IncomingMediaItem[] = [];
   const mediaUrl =
@@ -1664,6 +1670,8 @@ function parseInfobipWebhook(payload: any): ParsedWebhookPayload | null {
     message.content?.mediaUrl ||
     message.content?.url ||
     message.file?.url ||
+    firstContent?.url ||
+    firstContent?.mediaUrl ||
     null;
   const rawContentType =
     message.contentType ||
@@ -1671,11 +1679,16 @@ function parseInfobipWebhook(payload: any): ParsedWebhookPayload | null {
     message.media?.contentType ||
     message.media?.mimeType ||
     message.file?.mimeType ||
+    firstContent?.contentType ||
     null;
   const contentType =
     rawContentType || (mediaUrl ? inferContentTypeFromUrl(mediaUrl) : null);
   const mediaType =
-    typeof message.type === "string" ? message.type.toUpperCase() : "";
+    typeof message.type === "string"
+      ? message.type.toUpperCase()
+      : typeof firstContent?.type === "string"
+      ? firstContent.type.toUpperCase()
+      : "";
   const isMedia =
     ["IMAGE", "DOCUMENT", "VIDEO", "AUDIO", "STICKER"].includes(mediaType) ||
     !!mediaUrl;
@@ -1683,7 +1696,7 @@ function parseInfobipWebhook(payload: any): ParsedWebhookPayload | null {
     mediaItems.push({
       url: mediaUrl,
       contentType,
-      mediaSid: message.id || result.messageId || null,
+      mediaSid: message.id || result.messageId || firstContent?.id || null,
     });
   }
 
