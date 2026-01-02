@@ -980,11 +980,11 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
   const sendInteractiveMenu = async (text: string) => {
     const rows = [
       { id: "menu_order", title: "🛒 Hacer pedido" },
-      { id: "menu_repeat", title: "🔁 Repetir último pedido" },
-      { id: "menu_current", title: "📋 Ver pedido actual" },
-      { id: "menu_promos", title: "📋 Ver promos" },
-      { id: "menu_debts", title: "📋 Ver deudas" },
-      { id: "menu_cancel", title: "❌ Cancelar" },
+      { id: "menu_repeat", title: "🔁 Repetir pedido", description: "Repetir último pedido" },
+      { id: "menu_current", title: "📋 Pedido actual", description: "Ver pedido en revisión" },
+      { id: "menu_promos", title: "📋 Promos", description: "Ver promociones activas" },
+      { id: "menu_debts", title: "📋 Deudas", description: "Ver saldos pendientes" },
+      { id: "menu_cancel", title: "❌ Cancelar", description: "Cancelar pedido en revisión" },
     ];
     try {
       const waResult = await sendWhatsAppInteractiveList(

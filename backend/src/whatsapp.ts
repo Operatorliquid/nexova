@@ -160,8 +160,8 @@ export async function sendWhatsAppInteractiveList(
   const normalizedTo = normalizeInfobipNumber(to);
   const baseUrl = normalizeInfobipBaseUrl(INFOBIP_BASE_URL);
   const endpoint = `${baseUrl}/whatsapp/1/message/interactive/list`;
-  const sectionTitle = options?.sectionTitle || "Opciones";
-  const buttonText = options?.buttonText || "Elegir";
+  const sectionTitle = clipInfobipText(options?.sectionTitle || "Opciones", 24);
+  const buttonText = clipInfobipText(options?.buttonText || "Elegir", 20);
 
   const payload = {
     from: sender,
@@ -175,8 +175,10 @@ export async function sendWhatsAppInteractiveList(
             title: sectionTitle,
             rows: rows.map((row) => ({
               id: row.id,
-              title: row.title,
-              ...(row.description ? { description: row.description } : {}),
+              title: clipInfobipText(row.title, 24),
+              ...(row.description
+                ? { description: clipInfobipText(row.description, 72) }
+                : {}),
             })),
           },
         ],
@@ -201,6 +203,13 @@ function normalizeInfobipBaseUrl(raw: string): string {
     ? trimmed
     : `https://${trimmed}`;
   return withScheme.replace(/\/+$/, "");
+}
+
+function clipInfobipText(value: string, maxLen: number) {
+  if (!value) return value;
+  const trimmed = value.trim();
+  if (trimmed.length <= maxLen) return trimmed;
+  return trimmed.slice(0, maxLen - 1).trimEnd() + "…";
 }
 
 function normalizeInfobipNumber(raw: string): string {
