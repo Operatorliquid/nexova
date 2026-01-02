@@ -1,7 +1,11 @@
 import { prisma } from "../prisma";
-import { sendWhatsAppText } from "../whatsapp";
+import { sendWhatsAppInteractiveList, sendWhatsAppText } from "../whatsapp";
 import { appendMenuHintForBusiness } from "../utils/hints";
-import { matchProductName, upsertRetailOrder } from "../utils/retail";
+import {
+  getActivePromotionsForDoctor,
+  matchProductName,
+  upsertRetailOrder,
+} from "../utils/retail";
 import { normalizeDniInput } from "../utils/text";
 import { createCatalogPdf } from "../retail/catalogPdf";
 import { PaymentProofStatus, type Patient, type RetailClient } from "@prisma/client";
@@ -14,6 +18,92 @@ const norm = (s: string) =>
     .replace(/[^a-z0-9\s]/g, " ") // saca signos/emoji
     .replace(/\s+/g, " ")
     .trim();
+
+const isGreetingOnly = (t: string) =>
+  t === "hola" ||
+  t === "buenas" ||
+  t === "buen dia" ||
+  t === "buenas tardes" ||
+  t === "buenas noches";
+
+const isMenuTrigger = (t: string) =>
+  t === "menu" ||
+  t === "inicio" ||
+  t === "opciones" ||
+  t === "empezar";
+
+type MainMenuIntent =
+  | "show_menu"
+  | "order"
+  | "repeat_last"
+  | "view_current"
+  | "view_promos"
+  | "view_debts"
+  | "cancel";
+
+const detectMainMenuIntent = (raw: string): MainMenuIntent | null => {
+  const t = norm(raw);
+  if (!t) return null;
+  const idMap: Record<string, MainMenuIntent> = {
+    menu_order: "order",
+    menu_repeat: "repeat_last",
+    menu_current: "view_current",
+    menu_promos: "view_promos",
+    menu_debts: "view_debts",
+    menu_cancel: "cancel",
+  };
+  if (idMap[t]) return idMap[t];
+  if (isMenuTrigger(t) || isGreetingOnly(t)) return "show_menu";
+  if (/\bhacer\s+pedido\b/.test(t) || /\bpedido\s+nuevo\b/.test(t)) return "order";
+  if (/\brepetir\b/.test(t) && /\b(ultimo|último|anterior|pedido)\b/.test(t)) {
+    return "repeat_last";
+  }
+  if (/\bver\s+pedido\b/.test(t) || /\bpedido\s+actual\b/.test(t)) return "view_current";
+  if (/\b(ver\s+)?promos?\b/.test(t) || /\bpromociones\b/.test(t)) return "view_promos";
+  if (/\b(ver\s+)?deud(a|as)\b/.test(t) || /\bsaldo\b/.test(t)) return "view_debts";
+  if (/\bcancel(ar|a)\b/.test(t) || /\banular\b/.test(t)) return "cancel";
+  return null;
+};
+
+const getMissingRegistrationFields = (client: RetailClient) => {
+  const missing: string[] = [];
+  const name = (client.fullName || "").trim();
+  if (!name || name.toLowerCase() === "cliente whatsapp" || name.length < 3) {
+    missing.push("nombre y apellido");
+  }
+  if (!client.dni) missing.push("DNI");
+  if (!client.businessAddress) missing.push("dirección de entrega");
+  return missing;
+};
+
+const buildRegistrationPrompt = (missing: string[]) => {
+  const lines = missing.map((m) => `- ${m}`).join("\n");
+  return (
+    "👋 Hola, aún no contamos con tus datos. Necesito la siguiente información para darte de alta como cliente:\n\n" +
+    `${lines}\n\n` +
+    "Enviame algo así:\nNombre: Juan Pérez\nDNI: 12345678\nDirección: Calle 123, piso/depto."
+  );
+};
+
+const buildMainMenuMessage = (clientName: string | null, storeName: string | null) => {
+  const prompt = buildMainMenuPrompt(clientName, storeName);
+  return (
+    `${prompt}\n\n` +
+    "Opciones:\n" +
+    "• 🛒 Hacer pedido\n" +
+    "• 🔁 Repetir último pedido\n" +
+    "• 📋 Ver pedido actual\n" +
+    "• 📋 Ver promos\n" +
+    "• 📋 Ver deudas\n" +
+    "• ❌ Cancelar"
+  );
+};
+
+const buildMainMenuPrompt = (clientName: string | null, storeName: string | null) => {
+  const namePart = clientName ? ` ${clientName}` : "";
+  const storePart = storeName ? ` a la ${storeName}` : "";
+  return `👋 Hola${namePart} bienvenido${storePart}.\n\n¿Qué querés hacer?`;
+};
 
 const hasModifyIntent = (t: string) =>
   /\b(sum(ar|ame|a)?|agreg(ar|ame|a|alas)?|anad(ir|ime|i)?|quit(a|ame|a)?|sac(a|ame|a)?|borra|elimin(a|ame|a)?|sin|cambi(a|ame|a)?|reemplaz(a|ame|a)?)\b/i.test(
@@ -887,6 +977,43 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
     }
   };
 
+  const sendInteractiveMenu = async (text: string) => {
+    const rows = [
+      { id: "menu_order", title: "🛒 Hacer pedido" },
+      { id: "menu_repeat", title: "🔁 Repetir último pedido" },
+      { id: "menu_current", title: "📋 Ver pedido actual" },
+      { id: "menu_promos", title: "📋 Ver promos" },
+      { id: "menu_debts", title: "📋 Ver deudas" },
+      { id: "menu_cancel", title: "❌ Cancelar" },
+    ];
+    try {
+      const waResult = await sendWhatsAppInteractiveList(
+        phoneE164,
+        text,
+        rows,
+        doctorWhatsappConfig,
+        { sectionTitle: "Opciones", buttonText: "Elegir" }
+      );
+      await prisma.message.create({
+        data: {
+          waMessageId: (waResult as any)?.sid ?? null,
+          from: doctorNumber,
+          to: phoneE164,
+          direction: "outgoing",
+          type: "other",
+          body: text,
+          rawPayload: waResult,
+          retailClientId: client.id,
+          doctorId: doctor.id,
+        },
+      });
+      return true;
+    } catch (error) {
+      console.error("[RetailAgent] Error enviando menú interactivo:", error);
+      return false;
+    }
+  };
+
   const restockOrderInventory = async (order: any) => {
     if (!order || !order.inventoryDeducted) return;
     const map = new Map<number, number>();
@@ -912,6 +1039,155 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
         },
       });
     });
+  };
+
+  const buildOrderSummary = (order: any) =>
+    order?.items?.length
+      ? order.items
+          .map((it: any) => `• ${it.quantity} x ${it.product?.name || "Producto"}`)
+          .join("\n")
+      : "Pedido vacío";
+
+  const sendOrderReviewMessage = async (order: any, prefix?: string) => {
+    const summary = buildOrderSummary(order);
+    const header = prefix ? `${prefix}\n\n` : "";
+    await sendMessage(
+      `${header}Pedido #${order.sequenceNumber} (En revisión):\n${summary}\n` +
+        `Total: $${order.totalAmount ?? 0}\n\n` +
+        `Si está OK respondé *CONFIRMAR* (o OK / dale / listo).\n` +
+        `Para sumar: "sumar 1 coca". Para quitar: "quitar coca". Para cambiar: "cambiar coca a 3".`
+    );
+  };
+
+  const ensureInventoryDeductedForOrder = async (order: any) => {
+    if (!order || order.inventoryDeducted) return order;
+
+    const needByProductId = new Map<number, number>();
+    for (const it of order.items || []) {
+      needByProductId.set(it.productId, (needByProductId.get(it.productId) ?? 0) + it.quantity);
+    }
+    const productIds = Array.from(needByProductId.keys());
+    const productRows = await prisma.product.findMany({
+      where: { id: { in: productIds }, doctorId: doctor.id },
+      select: { id: true, name: true, quantity: true },
+    });
+    const prodById = new Map(productRows.map((p) => [p.id, p]));
+
+    const shortages = [];
+    for (const [pid, need] of needByProductId.entries()) {
+      const p = prodById.get(pid);
+      const have = p?.quantity ?? 0;
+      if (!p || have < need) {
+        shortages.push({ name: p?.name ?? "Producto", have, need });
+      }
+    }
+
+    if (shortages.length > 0) {
+      const msg = shortages.map((s) => `• ${s.name}: pediste ${s.need}, hay ${s.have}`).join("\n");
+      await sendMessage(
+        `No tengo stock suficiente para ese pedido 😕\n\n${msg}\n\n` +
+          `Decime si querés ajustar cantidades o reemplazar productos.`
+      );
+      return null;
+    }
+
+    try {
+      await prisma.$transaction(async (tx) => {
+        for (const [pid, need] of needByProductId.entries()) {
+          const r = await tx.product.updateMany({
+            where: { id: pid, doctorId: doctor.id, quantity: { gte: need } },
+            data: { quantity: { decrement: need } },
+          });
+          if (r.count !== 1) {
+            throw new Error(`NO_STOCK_RACE:${pid}:${need}`);
+          }
+        }
+        await tx.order.update({
+          where: { id: order.id },
+          data: {
+            inventoryDeducted: true,
+            inventoryDeductedAt: new Date(),
+          },
+        });
+      });
+
+      return await prisma.order.findUnique({
+        where: { id: order.id },
+        include: { items: { include: { product: true } } },
+      });
+    } catch (e: any) {
+      if (typeof e?.message === "string" && e.message.startsWith("NO_STOCK_RACE:")) {
+        await sendMessage(
+          "Uy, justo se quedó sin stock mientras armábamos el pedido 😕 " +
+            "Decime si querés ajustar cantidades o cambiar productos."
+        );
+        return null;
+      }
+      throw e;
+    }
+  };
+
+  const createPendingOrderFromItems = async (
+    items: Array<{ productId: number; quantity: number }>,
+    prefix?: string
+  ) => {
+    if (!items.length) {
+      await sendMessage("No encontré productos para repetir. ¿Querés armar un pedido nuevo?");
+      return true;
+    }
+
+    const stockRows = await prisma.product.findMany({
+      where: { id: { in: items.map((i) => i.productId) }, doctorId: doctor.id },
+      select: { id: true, name: true, quantity: true },
+    });
+    const stockById = new Map(stockRows.map((p) => [p.id, p]));
+    const stockIssues: Array<{ name: string; have: number; need: number }> = [];
+    items.forEach((item) => {
+      const product = stockById.get(item.productId);
+      if (product && product.quantity < item.quantity) {
+        stockIssues.push({
+          name: product.name,
+          have: product.quantity ?? 0,
+          need: item.quantity,
+        });
+      }
+    });
+
+    if (stockIssues.length > 0) {
+      const msg = stockIssues
+        .map((s) => `• ${s.name}: pediste ${s.need}, hay ${s.have}`)
+        .join("\n");
+      await sendMessage(
+        `No tengo stock suficiente para repetir ese pedido 😕\n\n${msg}\n\n` +
+          `Decime si querés ajustar cantidades o reemplazar productos.`
+      );
+      return true;
+    }
+
+    const upsert = await upsertRetailOrder({
+      doctorId: doctor.id,
+      clientId: client.id,
+      items,
+      mode: "replace",
+      status: "pending",
+      existingOrderId: null,
+      customerName: client.fullName || patient?.fullName || "Cliente WhatsApp",
+      customerAddress: client.businessAddress || patient?.address || null,
+      customerDni: client.dni || patient?.dni || null,
+    });
+
+    if (!upsert.ok || !upsert.order) {
+      await sendMessage("No pude repetir el pedido. Probemos de nuevo más tarde.");
+      return true;
+    }
+
+    let order = upsert.order;
+    const updated = await ensureInventoryDeductedForOrder(order);
+    if (!updated) return true;
+    order = updated;
+
+    await sendOrderReviewMessage(order, prefix);
+    return true;
   };
 
   // Envía el catálogo PDF (con fallback a link) y registra el mensaje
@@ -1166,6 +1442,117 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
   if (newTopic && awaiting && clearOnNewTopicKinds.has((awaiting as any).kind)) {
     awaiting = null;
     await clearRetailAwaiting(client.id);
+  }
+
+  const menuIntent = detectMainMenuIntent(msgText);
+  if (!awaiting && menuIntent) {
+    const missing = getMissingRegistrationFields(client);
+    const hasRegistration = missing.length === 0;
+
+    if (!hasRegistration) {
+      await sendMessage(buildRegistrationPrompt(missing));
+      return true;
+    }
+
+    if (menuIntent === "show_menu") {
+      const clientName = (client.fullName || "").trim();
+      const prompt = buildMainMenuPrompt(clientName || null, doctor.name || null);
+      const sent = await sendInteractiveMenu(prompt);
+      if (!sent) {
+        await sendMessage(buildMainMenuMessage(clientName || null, doctor.name || null));
+      }
+      return true;
+    }
+
+    if (menuIntent === "order") {
+      await sendMessage(
+        "Dale 🙌 Decime qué productos querés y cuántos. Ej: “2 cocas 1.5L y 1 sprite”."
+      );
+      return true;
+    }
+
+    if (menuIntent === "view_current") {
+      const pending = await prisma.order.findFirst({
+        where: { doctorId: doctor.id, clientId: client.id, status: "pending" },
+        include: { items: { include: { product: true } } },
+        orderBy: { createdAt: "desc" },
+      });
+      if (!pending) {
+        await sendMessage(
+          "No veo pedidos en revisión ahora. ¿Querés armar uno nuevo o consultar algo más?"
+        );
+        return true;
+      }
+      await sendOrderReviewMessage(pending);
+      return true;
+    }
+
+    if (menuIntent === "view_promos") {
+      const promos = await getActivePromotionsForDoctor(doctor.id);
+      if (!promos || promos.length === 0) {
+        await sendMessage("No tengo promos activas ahora mismo.");
+        return true;
+      }
+      const lines = promos.slice(0, 6).map((p) => {
+        const desc = p.description ? `: ${p.description}` : "";
+        const until = p.endDate ? ` (hasta ${p.endDate.toISOString().slice(0, 10)})` : "";
+        return `• ${p.title}${desc}${until}`;
+      });
+      await sendMessage(`Promos activas 👇\n\n${lines.join("\n")}`);
+      return true;
+    }
+
+    if (menuIntent === "view_debts") {
+      const debtOrders = await prisma.order.findMany({
+        where: {
+          doctorId: doctor.id,
+          clientId: client.id,
+          status: "confirmed",
+          paymentStatus: { in: ["unpaid", "partial"] },
+        },
+        select: { sequenceNumber: true, totalAmount: true, paidAmount: true },
+        orderBy: { createdAt: "desc" },
+        take: 5,
+      });
+
+      if (!debtOrders.length) {
+        await sendMessage("No veo deudas pendientes ✅");
+        return true;
+      }
+
+      let total = 0;
+      const lines = debtOrders.map((o) => {
+        const pendingAmount = Math.max((o.totalAmount ?? 0) - (o.paidAmount ?? 0), 0);
+        total += pendingAmount;
+        return `• Pedido #${o.sequenceNumber}: saldo $${pendingAmount}`;
+      });
+      await sendMessage(`Tenés saldo pendiente por $${total}:\n${lines.join("\n")}`);
+      return true;
+    }
+
+    if (menuIntent === "repeat_last") {
+      const lastConfirmed = await prisma.order.findFirst({
+        where: { doctorId: doctor.id, clientId: client.id, status: "confirmed" },
+        include: { items: { include: { product: true } } },
+        orderBy: { createdAt: "desc" },
+      });
+
+      if (!lastConfirmed) {
+        await sendMessage("No encontré pedidos anteriores para repetir.");
+        return true;
+      }
+
+      const items = lastConfirmed.items.map((it) => ({
+        productId: it.productId,
+        quantity: it.quantity,
+      }));
+
+      return await createPendingOrderFromItems(items, "Listo ✅ Repetí tu último pedido.");
+    }
+
+    if (menuIntent === "cancel") {
+      action = { type: "retail_cancel_order" } as any;
+    }
   }
 
   const softAckShort =

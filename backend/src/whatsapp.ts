@@ -126,6 +126,74 @@ export async function sendWhatsAppText(
   return response.data;
 }
 
+export async function sendWhatsAppInteractiveList(
+  to: string,
+  body: string,
+  rows: Array<{ id: string; title: string; description?: string }>,
+  credentials?: WhatsappCredentials,
+  options?: { sectionTitle?: string; buttonText?: string }
+) {
+  if (resolveWhatsappProvider() !== "infobip") {
+    const fallback = [
+      body,
+      "Opciones:",
+      ...rows.map((r) => `- ${r.title}`),
+    ].join("\n");
+    return sendWhatsAppText(to, fallback, credentials);
+  }
+
+  if (!INFOBIP_BASE_URL || !INFOBIP_API_KEY) {
+    throw new Error(
+      "Infobip no está configurado. Completá INFOBIP_BASE_URL y INFOBIP_API_KEY en el .env"
+    );
+  }
+
+  const sender = normalizeInfobipNumber(
+    credentials?.from || process.env.INFOBIP_WHATSAPP_FROM || TWILIO_WHATSAPP_FROM
+  );
+  if (!sender) {
+    throw new Error(
+      "No hay número de WhatsApp asignado. Conectá un número de Infobip."
+    );
+  }
+
+  const normalizedTo = normalizeInfobipNumber(to);
+  const baseUrl = normalizeInfobipBaseUrl(INFOBIP_BASE_URL);
+  const endpoint = `${baseUrl}/whatsapp/1/message/interactive/list`;
+  const sectionTitle = options?.sectionTitle || "Opciones";
+  const buttonText = options?.buttonText || "Elegir";
+
+  const payload = {
+    from: sender,
+    to: normalizedTo,
+    content: {
+      body: { text: body },
+      action: {
+        button: buttonText,
+        sections: [
+          {
+            title: sectionTitle,
+            rows: rows.map((row) => ({
+              id: row.id,
+              title: row.title,
+              ...(row.description ? { description: row.description } : {}),
+            })),
+          },
+        ],
+      },
+    },
+  };
+
+  const response = await axios.post(endpoint, payload, {
+    headers: {
+      Authorization: `App ${INFOBIP_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+  });
+
+  return response.data;
+}
+
 function normalizeInfobipBaseUrl(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return "";

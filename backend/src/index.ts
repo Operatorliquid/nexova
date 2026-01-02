@@ -1653,10 +1653,16 @@ function parseInfobipWebhook(payload: any): ParsedWebhookPayload | null {
 
   const contentItems = Array.isArray(result.content) ? result.content : [];
   const firstContent = contentItems[0] || null;
+  const contentId =
+    typeof firstContent?.id === "string" ? firstContent.id.trim() : "";
+  const contentTitle =
+    typeof firstContent?.title === "string" ? firstContent.title.trim() : "";
   const bodyText =
     extractInfobipText(message) ||
+    contentId ||
     (typeof firstContent?.cleanText === "string" ? firstContent.cleanText.trim() : "") ||
-    (typeof firstContent?.text === "string" ? firstContent.text.trim() : "");
+    (typeof firstContent?.text === "string" ? firstContent.text.trim() : "") ||
+    contentTitle;
   const profileName = result.contact?.name || null;
   const waMessageId =
     result.messageId || message.id || firstContent?.id || null;
