@@ -1445,7 +1445,11 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
   }
 
   const menuIntent = detectMainMenuIntent(msgText);
-  if (!awaiting && menuIntent) {
+  if (menuIntent) {
+    if (awaiting) {
+      await clearRetailAwaiting(client.id);
+      awaiting = null;
+    }
     const missing = getMissingRegistrationFields(client);
     const hasRegistration = missing.length === 0;
 
