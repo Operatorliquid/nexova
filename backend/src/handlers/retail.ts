@@ -1009,7 +1009,11 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
       });
       return true;
     } catch (error) {
-      console.error("[RetailAgent] Error enviando menú interactivo:", error);
+      const detail =
+        (error as any)?.response?.data ||
+        (error as any)?.message ||
+        error;
+      console.error("[RetailAgent] Error enviando menú interactivo:", detail);
       return false;
     }
   };

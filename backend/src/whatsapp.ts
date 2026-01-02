@@ -167,6 +167,7 @@ export async function sendWhatsAppInteractiveList(
     from: sender,
     to: normalizedTo,
     content: {
+      type: "LIST",
       body: { text: body },
       action: {
         button: buttonText,
