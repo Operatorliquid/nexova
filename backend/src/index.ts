@@ -86,6 +86,7 @@ const WHATSAPP_PROVIDER =
   process.env.WHATSAPP_PROVIDER?.toLowerCase() === "infobip"
     ? "infobip"
     : "twilio";
+const DEBUG_WA_WEBHOOK = process.env.DEBUG_WA_WEBHOOK === "1";
 const CORS_ORIGINS = (process.env.CORS_ORIGINS || "http://localhost:5173")
   .split(",")
   .map((origin) => origin.trim())
@@ -1638,11 +1639,16 @@ function inferContentTypeFromUrl(url: string): string | null {
 }
 
 function parseInfobipWebhook(payload: any): ParsedWebhookPayload | null {
-  const result = Array.isArray(payload?.results) ? payload.results[0] : null;
+  const results = Array.isArray(payload?.results)
+    ? payload.results
+    : Array.isArray(payload?.messages)
+    ? payload.messages
+    : null;
+  const result = results ? results[0] : null;
   if (!result) return null;
   const message = result.message || {};
-  const fromRaw = result.from;
-  const toRaw = result.to;
+  const fromRaw = result.from || message.from;
+  const toRaw = result.to || message.to;
   if (!fromRaw || !toRaw) return null;
 
   const bodyText = extractInfobipText(message);
@@ -3867,6 +3873,9 @@ app.get("/api/whatsapp/webhook", (_req: Request, res: Response) => {
 
 app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
   try {
+    if (DEBUG_WA_WEBHOOK) {
+      console.log("[WhatsApp Webhook] Provider:", WHATSAPP_PROVIDER);
+    }
     if (WHATSAPP_PROVIDER === "twilio" && !validateTwilioSignature(req)) {
       return res.status(403).send("Invalid signature");
     }
@@ -3883,6 +3892,11 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
     if (WHATSAPP_PROVIDER === "infobip") {
       const parsed = parseInfobipWebhook(payload);
       if (!parsed) {
+        if (DEBUG_WA_WEBHOOK) {
+          console.warn("[Infobip Webhook] Payload invalido", {
+            keys: payload ? Object.keys(payload) : [],
+          });
+        }
         return res.sendStatus(200);
       }
       ({
@@ -3926,6 +3940,10 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
     const phoneE164 = formatE164(safeWaId);
     const doctorNumber = normalizeWhatsappSender(toRaw);
     const doctorNumberPlain = doctorNumber.replace(/^whatsapp:/i, "");
+    const doctorNumberDigits = doctorNumberPlain.replace(/\D/g, "");
+    const doctorNumberCandidates = Array.from(
+      new Set([doctorNumber, doctorNumberPlain, doctorNumberDigits].filter(Boolean))
+    );
     const numMedia = mediaItems.length;
 
     if (!phoneE164 || !doctorNumber) {
@@ -3933,7 +3951,7 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
     }
 
     const doctor = await prisma.doctor.findFirst({
-      where: { whatsappBusinessNumber: { in: [doctorNumber, doctorNumberPlain] } },
+      where: { whatsappBusinessNumber: { in: doctorNumberCandidates } },
         select: {
           id: true,
           name: true,
@@ -3955,7 +3973,10 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
     });
 
     if (!doctor) {
-      console.warn("[Twilio Webhook] Doctor no encontrado para: ", doctorNumber);
+      console.warn(
+        "[WhatsApp Webhook] Doctor no encontrado para:",
+        doctorNumberCandidates
+      );
       return res.sendStatus(200);
     }
 
