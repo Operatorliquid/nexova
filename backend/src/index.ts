@@ -1698,6 +1698,38 @@ function parseInfobipWebhook(payload: any): ParsedWebhookPayload | null {
   };
 }
 
+function sanitizeWebhookPayloadForLogs(payload: any) {
+  const seen = new WeakSet<object>();
+  const walk = (value: any): any => {
+    if (!value || typeof value !== "object") {
+      if (typeof value === "string") {
+        let masked = value.replace(/\d{7,}/g, (m) => `***${m.slice(-3)}`);
+        masked = masked.replace(/(token=)[^&]+/gi, "$1***");
+        return masked;
+      }
+      return value;
+    }
+    if (seen.has(value)) return "[Circular]";
+    seen.add(value);
+
+    if (Array.isArray(value)) {
+      return value.map((item) => walk(item));
+    }
+
+    const out: Record<string, any> = {};
+    for (const [key, val] of Object.entries(value)) {
+      if (/authorization|api[-_]?key|token/i.test(key)) {
+        out[key] = "***";
+      } else {
+        out[key] = walk(val);
+      }
+    }
+    return out;
+  };
+
+  return walk(payload);
+}
+
 function extractWhatsappError(error: any) {
   if (!error) return null;
   const data = error?.response?.data;
@@ -3875,6 +3907,12 @@ app.post("/api/whatsapp/webhook", async (req: Request, res: Response) => {
   try {
     if (DEBUG_WA_WEBHOOK) {
       console.log("[WhatsApp Webhook] Provider:", WHATSAPP_PROVIDER);
+      if (WHATSAPP_PROVIDER === "infobip") {
+        console.log(
+          "[Infobip Webhook] Payload:",
+          JSON.stringify(sanitizeWebhookPayloadForLogs(req.body))
+        );
+      }
     }
     if (WHATSAPP_PROVIDER === "twilio" && !validateTwilioSignature(req)) {
       return res.status(403).send("Invalid signature");
