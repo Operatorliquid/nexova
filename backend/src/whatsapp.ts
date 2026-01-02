@@ -170,6 +170,7 @@ export async function sendWhatsAppInteractiveList(
       type: "LIST",
       body: { text: body },
       action: {
+        title: sectionTitle,
         button: buttonText,
         sections: [
           {
