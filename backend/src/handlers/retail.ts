@@ -1025,11 +1025,22 @@ export async function handleRetailAgentAction(params: HandleRetailParams) {  con
       });
       return true;
     } catch (error) {
-      const detail =
-        (error as any)?.response?.data ||
-        (error as any)?.message ||
-        error;
-      console.error("[RetailAgent] Error enviando menú interactivo:", detail);
+      const detail = (error as any)?.response?.data;
+      if (detail) {
+        try {
+          console.error(
+            "[RetailAgent] Error enviando menú interactivo (detail):",
+            JSON.stringify(detail)
+          );
+        } catch {
+          console.error("[RetailAgent] Error enviando menú interactivo (detail):", detail);
+        }
+      } else {
+        console.error(
+          "[RetailAgent] Error enviando menú interactivo:",
+          (error as any)?.message || error
+        );
+      }
       return false;
     }
   };
